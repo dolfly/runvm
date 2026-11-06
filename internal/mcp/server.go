@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,11 +41,17 @@ type Server struct {
 	version string
 	tools   map[string]*Tool
 	order   []string
+
+	// cancels maps a request id to the cancel function of the call running
+	// under it, so notifications/cancelled can actually stop work instead of
+	// being a polite no-op.
+	cancelMu sync.Mutex
+	cancels  map[string]context.CancelFunc
 }
 
 // NewServer creates an empty server. Tools are added before Serve.
 func NewServer(name, version string) *Server {
-	return &Server{name: name, version: version, tools: map[string]*Tool{}}
+	return &Server{name: name, version: version, tools: map[string]*Tool{}, cancels: map[string]context.CancelFunc{}}
 }
 
 // Add registers a tool. Re-adding a name replaces it in place, which keeps
@@ -133,8 +140,21 @@ func (s *Server) handle(ctx context.Context, line []byte) *Response {
 	if err := json.Unmarshal(line, &req); err != nil {
 		return &Response{JSONRPC: JSONRPCVersion, Error: rpcErrorf(CodeParseError, "invalid JSON: %v", err)}
 	}
-	resp := &Response{JSONRPC: JSONRPCVersion, ID: req.ID}
 
+	// Cancellation arrives as a notification naming the request to stop.
+	if req.Method == "notifications/cancelled" {
+		s.cancelRequest(req.Params)
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if !req.IsNotification() {
+		s.registerCancel(req.ID, cancel)
+		defer s.unregisterCancel(req.ID)
+	}
+
+	resp := &Response{JSONRPC: JSONRPCVersion, ID: req.ID}
 	result, rerr := s.dispatch(ctx, &req)
 	if req.IsNotification() {
 		return nil
@@ -215,13 +235,21 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, *RP
 	value, err := tool.Handler(cctx, p.Arguments)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return callResult{IsError: true, Content: []textContent{{Type: "text",
+			return callResult{IsError: true, Content: []any{textContent{Type: "text",
 				Text: fmt.Sprintf("%s timed out after %s", p.Name, DefaultToolTimeout)}}}, nil
 		}
-		return callResult{IsError: true, Content: []textContent{{Type: "text",
+		return callResult{IsError: true, Content: []any{textContent{Type: "text",
 			Text: err.Error()}}}, nil
 	}
-	return callResult{Content: []textContent{{Type: "text", Text: toJSON(value)}}}, nil
+	if img, ok := value.(Image); ok {
+		content := make([]any, 0, 2)
+		if img.Caption != "" {
+			content = append(content, textContent{Type: "text", Text: img.Caption})
+		}
+		content = append(content, imageContent{Type: "image", Data: base64.StdEncoding.EncodeToString(img.Data), MimeType: img.MimeType})
+		return callResult{Content: content}, nil
+	}
+	return callResult{Content: []any{textContent{Type: "text", Text: toJSON(value)}}}, nil
 }
 
 // toJSON renders a tool result. Strings pass through unchanged so a JS
@@ -235,4 +263,33 @@ func toJSON(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+func (s *Server) registerCancel(id json.RawMessage, cancel context.CancelFunc) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	s.cancels[string(id)] = cancel
+}
+
+func (s *Server) unregisterCancel(id json.RawMessage) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	delete(s.cancels, string(id))
+}
+
+// cancelRequest stops the call the client named. An unknown id is ignored:
+// the call may have finished between the cancel being sent and arriving.
+func (s *Server) cancelRequest(params json.RawMessage) {
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || len(p.RequestID) == 0 {
+		return
+	}
+	s.cancelMu.Lock()
+	cancel := s.cancels[string(p.RequestID)]
+	s.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }

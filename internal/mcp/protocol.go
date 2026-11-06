@@ -79,9 +79,24 @@ type textContent struct {
 	Text string `json:"text"`
 }
 
+// imageContent is one base64 image in a tool result.
+type imageContent struct {
+	Type     string `json:"type"`
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+}
+
+// Image is what a handler returns when the result is a picture: the model gets
+// the pixels plus an optional one-line caption.
+type Image struct {
+	MimeType string
+	Data     []byte
+	Caption  string
+}
+
 type callResult struct {
-	Content []textContent `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
+	Content []any `json:"content"`
+	IsError bool  `json:"isError,omitempty"`
 }
 
 func negotiateVersion(client string) string {

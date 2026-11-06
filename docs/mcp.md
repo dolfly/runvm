@@ -130,6 +130,8 @@
 | `target` | string | ✓ | URL、本地文件路径,或 `about:blank` |
 | `env` | object | | 字符串表,页面里以 `webframe.env` 可见(任何页面脚本都能读) |
 | `ephemeral` | boolean | | 默认 `true`:cookie/存储/缓存只留内存 |
+| `visible` | boolean | | 画进窗口(私有 Xvfb),截图必须开 |
+| `width` / `height` | integer | | 窗口尺寸,默认 1280×800 |
 
 ```json
 {"session": "h5-1", "target": "examples/h5/page.html"}
@@ -166,6 +168,17 @@
 
 `level` 为 `log`/`warn`/`error`/`assert`/`dialog`(弹窗被拦截时)以及 `load`(页面加载完成)、`error`(页面异常)。
 
+## h5_screenshot
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session` | string | ✓ | 用 `visible: true` 打开的会话 |
+| `path` | string | | 同时把 PNG 写到这个路径 |
+
+返回两段 content:`text`(说明与路径)和 `image`(`image/png`,base64)。
+
+前提有三条,每条有自己的错误信息:会话是可见的、宿主自己拥有 display(所以抓到的是页面不是桌面)、平台是 Linux。截图前会等两帧 `requestAnimationFrame` + 120ms,避免抓到"布局好了但还没画"的白屏。
+
 ## h5_close
 
 | 参数 | 类型 | 必填 |
@@ -177,6 +190,20 @@
 ```
 
 ---
+
+## HTTP 传输
+
+stdio 之外,同一套工具可以从 `POST /mcp` 调用:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/mcp \
+  -H "Authorization: Bearer $RUNVM_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+- 批量:发 JSON 数组,收回数组;只有通知时返回 `202`。
+- 鉴权:设置 `RUNVM_TOKEN` 或 `-token` 后要求 `Authorization: Bearer <token>`(常量时间比较)。
+- `GET /mcp` 返回 `405`:本服务不推送服务端发起的消息。
 
 ## 一次完整会话
 

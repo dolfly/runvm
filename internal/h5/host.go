@@ -19,7 +19,12 @@ import (
 // It must be called from the main goroutine, after runtime.LockOSThread:
 // webframe binds the webview to the OS thread that created it.
 func RunHost(target string, env map[string]string, ephemeral bool) int {
-	if err := ensureDisplay(); err != nil {
+	visible := os.Getenv("RUNVM_VISIBLE") == "1"
+	width, height := viewportSize()
+	// A visible page always gets its own display, so a capture can never grab
+	// somebody's desktop by accident.
+	own, err := ensureDisplay(visible, width, height)
+	if err != nil {
 		emitFatal(err)
 		return 1
 	}
@@ -54,6 +59,9 @@ func RunHost(target string, env map[string]string, ephemeral bool) int {
 	frame, err := webframe.New(webframe.Options{
 		Env:       env,
 		Ephemeral: ephemeral,
+		Window:    visible,
+		Width:     width,
+		Height:    height,
 		Console: func(level, text string) {
 			emit(hostMsg{Event: "console", Level: level, Text: text})
 		},
@@ -97,6 +105,9 @@ func RunHost(target string, env map[string]string, ephemeral bool) int {
 		return 1
 	}
 	f = frame
+	// Tell the parent where this page lives, so h5_screenshot knows whether a
+	// capture is possible at all.
+	emit(hostMsg{Event: "display", Text: os.Getenv("DISPLAY"), Own: own})
 
 	go func() {
 		sc := bufio.NewScanner(os.Stdin)
@@ -154,4 +165,13 @@ func resolveTarget(target string) string {
 func emitFatal(err error) {
 	enc := json.NewEncoder(os.Stdout)
 	_ = enc.Encode(hostMsg{Event: "exception", Level: "fatal", Text: err.Error()})
+}
+
+// viewportSize reads RUNVM_VIEWPORT ("1280x800"); zero means the page decides.
+func viewportSize() (int, int) {
+	var w, h int
+	if _, err := fmt.Sscanf(os.Getenv("RUNVM_VIEWPORT"), "%dx%d", &w, &h); err != nil {
+		return 0, 0
+	}
+	return w, h
 }

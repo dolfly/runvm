@@ -62,7 +62,7 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo apt-get update -qq
-          sudo -E apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri
+          sudo -E apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri x11-apps
 
       - name: libunicorn
         env:

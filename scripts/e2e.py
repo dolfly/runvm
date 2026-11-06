@@ -118,6 +118,25 @@ def main():
     expect("close 1", c.call("h5_close", session="h5-1"), '"closed"')
     expect("close 2", c.call("h5_close", session="h5-2"), '"closed"')
 
+    print("== h5: screenshot ==")
+    shot_path = "e2e-screenshot.png"
+    opened = c.call("h5_open", target="examples/h5/page.html", visible=True)
+    sid = json.loads(text(opened))["session"]
+    shot = c.call("h5_screenshot", session=sid, path=shot_path)
+    content = (shot.get("result") or {}).get("content") or []
+    image = next((x for x in content if x.get("type") == "image"), None)
+    ok = image is not None and image.get("mimeType") == "image/png" and len(image.get("data", "")) > 1000
+    print(f"{'ok  ' if ok else 'FAIL'} screenshot returns an image: {[x.get('type') for x in content]}")
+    if not ok:
+        FAILED.append(f"screenshot content: {content}")
+    on_disk = os.path.exists(shot_path) and open(shot_path, "rb").read(8) == b"\x89PNG\r\n\x1a\n"
+    print(f"{'ok  ' if on_disk else 'FAIL'} screenshot written to {shot_path}")
+    if not on_disk:
+        FAILED.append("screenshot file missing or not a PNG")
+    if os.path.exists(shot_path):
+        os.remove(shot_path)
+    expect("close visible", c.call("h5_close", session=sid), '"closed"')
+
     c.close()
 
     if FAILED:

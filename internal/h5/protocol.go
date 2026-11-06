@@ -22,6 +22,7 @@ type hostMsg struct {
 	Level string `json:"level,omitempty"`
 	Text  string `json:"text,omitempty"`
 	Code  int    `json:"code,omitempty"`
+	Own   bool   `json:"own,omitempty"`
 
 	ID     int    `json:"id,omitempty"`
 	OK     *bool  `json:"ok,omitempty"`

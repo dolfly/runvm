@@ -5,6 +5,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"runtime"
@@ -71,12 +72,12 @@ func Run(version string) Report {
 	}
 
 	start := time.Now()
-	page, err := h5.Open("about:blank", nil, true, 20*time.Second)
+	page, err := h5.Open("about:blank", h5.OpenOptions{Ephemeral: true, ReadyTimeout: 20 * time.Second})
 	if err != nil {
 		r.Checks = append(r.Checks, Check{Name: "webview", OK: false, Detail: err.Error(),
 			Hint: "Linux needs WebKitGTK and Xvfb: apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri"})
 	} else {
-		_, evalErr := page.Eval("1 + 1", 5*time.Second)
+		_, evalErr := page.Eval(context.Background(), "1 + 1", 5*time.Second)
 		_ = page.Close()
 		c := Check{Name: "webview", OK: evalErr == nil,
 			Detail: fmt.Sprintf("about:blank ready in %s", time.Since(start).Round(time.Millisecond))}

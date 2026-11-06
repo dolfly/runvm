@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/isesword/golem/emulator"
 )
@@ -40,6 +41,7 @@ type Session struct {
 	jni  *jniHandler
 
 	closeOnce sync.Once
+	created   atomic.Int64
 
 	// hooks are applied lazily: an engine learns about them the first time it
 	// is used after they were registered, so registering a hook never costs a
@@ -110,6 +112,7 @@ func Open(path string, opts OpenOptions) (*Session, error) {
 
 	pool, err := emulator.NewPool[*emulator.Emulator](opts.Pool, opts.MaxUses,
 		func() (*emulator.Emulator, error) {
+			s.created.Add(1)
 			emu, err := emulator.New(s.cfg)
 			if err != nil {
 				return nil, err
@@ -350,6 +353,11 @@ func (s *Session) Hooks() map[string]uint64 {
 	}
 	return out
 }
+
+// EnginesCreated counts every engine ever constructed, including pool warmup
+// and post-panic rebuilds. Growth past the configured size is the signal that
+// something is recycling or crashing.
+func (s *Session) EnginesCreated() int64 { return s.created.Load() }
 
 // Stats reports pool occupancy, so a long test run can be watched instead of
 // guessed at.

@@ -17,7 +17,7 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>12 个工具"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>13 个工具"]
   S --> REG["session.Store<br/>android-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
   REG --> H["h5 后端<br/>进程外"]
@@ -103,6 +103,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
 | `h5_eval` | 在页面里执行 JS,返回结果(自动 await Promise) |
 | `h5_console` | 取回缓冲的 console 与页面异常 |
+| `h5_screenshot` | 把页面截成 PNG 返回(Linux,需 `visible: true`) |
 | `h5_close` | 关闭页面宿主进程 |
 
 参数细节见 [docs/mcp.md](docs/mcp.md)。请求是**并发处理**的(不同会话互不阻塞),响应按 `id` 对应,可能乱序返回。`android_call` 的 `args` 支持三种形态,一条调用就能覆盖大多数 native 接口:
@@ -114,6 +115,34 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 ```
 
 `android_open` 还可以开一个**引擎池**(`"pool": 4`):多个 AArch64 引擎共享 `.so` 的只读页,同一会话的调用就能真并行。默认 1,即一次一个调用。
+
+## 远程访问(HTTP)
+
+stdio 需要客户端能拉起进程;拿不到进程的场景(网页版客户端、别的机器、容器外)用 Streamable HTTP:
+
+```bash
+# 绑定非回环地址时必须给 token,否则拒绝启动
+RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
+# runvm: MCP over HTTP on http://0.0.0.0:8765/mcp (auth: bearer token)
+```
+
+```json
+{"mcpServers":{"runvm":{
+  "type":"http",
+  "url":"https://your-host/mcp",
+  "headers":{"Authorization":"Bearer ${RUNVM_TOKEN}"}}}}
+```
+
+端点与语义:
+
+| 路径 | 行为 |
+|---|---|
+| `POST /mcp` | 单条或批量 JSON-RPC;通知返回 `202` 空体 |
+| `GET /mcp` | `405`——本服务不推送服务端发起的消息,长连接会白等 |
+| `DELETE /mcp` | `200`;会话由 `h5_close` / `android_close` 关,不靠这个 |
+| `GET /healthz` | `ok` |
+
+`initialize` 会返回 `Mcp-Session-Id`,本服务不强制回传。**不给 token 就只监听回环**:一个没有鉴权的端口等于让网络里的人在你的 native 模拟器里跑代码,所以 `-addr 0.0.0.0` + 无 token 会被直接拒绝。
 
 ## 环境变量
 
@@ -127,7 +156,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 - **不是安全沙箱**。加载的 `.so` 在你的进程里被模拟执行,页面在真实 WebKit 里运行。只跑你信任的代码。
 - **一个页面一个进程**,`h5_open` 的成本约 0.5–1.5 秒;批量测试请复用会话。不同页面之间并行,同一个页面内的 `h5_eval` 串行(保证语句顺序)。
-- **没有截图/PDF/网络拦截**。webframe 的 API 不提供,而 glaze 启动 WebView 时不带调试端口,所以"正经接 CDP"也无从下手;三条可行路线在 [docs/ROADMAP.md](docs/ROADMAP.md),现在刻意不做而不是做个假的。
+- **截图是 Linux 专有**。做法是:页面用 `visible: true` 画进**本进程自己起的 Xvfb**(屏幕尺寸=视口),再 `xwd` 抓根窗口、Go 里解 XWD 转 PNG。因此它拿到的一定是那个页面,不会误抓你的桌面;代价是 macOS/Windows 上暂时没有——那需要给 glaze 加三平台 snapshot 导出,见 [docs/ROADMAP.md](docs/ROADMAP.md)。没有 PDF、没有网络拦截。
 - **macOS / Windows 未实测**。代码路径按 webframe/golem 的支持写好了(macOS 无需 Xvfb,Windows 需要 WebView2),但没有 CI 覆盖。
 - **`go.mod` 里有一条 `replace`**。webframe 把 glaze 钉在作者的 fork 上,而 Go 会忽略依赖里的 `replace`,所以本模块必须重复一遍;升级 webframe 时这里要跟着改。
 
@@ -146,7 +175,7 @@ make fmt
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   12 个工具的参数校验与调用编排
+internal/tools/   13 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/h5/      webframe 宿主(子进程)与驱动

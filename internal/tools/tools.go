@@ -134,6 +134,9 @@ func New(version string) (*mcp.Server, *Set) {
 			"env": objectFields(map[string]any{"type": "string"},
 				"Strings exposed to the page as webframe.env (before any page script)"),
 			"ephemeral": boolean("Keep cookies, storage and cache in memory only (default true)"),
+			"visible":   boolean("Draw the page in a window instead of offscreen; required for h5_screenshot"),
+			"width":     num("Window width when visible (default 1280)"),
+			"height":    num("Window height when visible (default 800)"),
 		}, "target"),
 		Handler: s.h5Open,
 	})
@@ -158,6 +161,17 @@ func New(version string) (*mcp.Server, *Set) {
 			"clear":   boolean("Clear the buffer after reading (default true)"),
 		}, "session"),
 		Handler: s.h5Console,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "h5_screenshot",
+		Description: "Capture the page as a PNG and return it as an image. The session must have been opened " +
+			"with visible=true on Linux, where the host draws in a private Xvfb it started itself.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from h5_open (opened with visible: true)"),
+			"path":    str("Optional file path to also write the PNG to"),
+		}, "session"),
+		Handler: s.h5Screenshot,
 	})
 
 	srv.Add(mcp.Tool{
@@ -222,7 +236,11 @@ func (s *Set) androidDetails() []map[string]any {
 		entry := map[string]any{
 			"session": id,
 			"pool":    sess.PoolSize(),
-			"engines": map[string]any{"in_use": st.InUse, "idle": st.Idle},
+			"engines": map[string]any{
+				"in_use":  st.InUse,
+				"idle":    st.Idle,
+				"created": sess.EnginesCreated(),
+			},
 		}
 		if hooks := sess.Hooks(); len(hooks) > 0 {
 			entry["hooks"] = hooks
@@ -421,6 +439,9 @@ func (s *Set) h5Open(_ context.Context, raw json.RawMessage) (any, error) {
 		Target    string            `json:"target"`
 		Env       map[string]string `json:"env"`
 		Ephemeral *bool             `json:"ephemeral"`
+		Visible   *bool             `json:"visible"`
+		Width     int               `json:"width"`
+		Height    int               `json:"height"`
 	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
@@ -429,7 +450,13 @@ func (s *Set) h5Open(_ context.Context, raw json.RawMessage) (any, error) {
 	if a.Ephemeral != nil {
 		ephemeral = *a.Ephemeral
 	}
-	sess, err := h5.Open(a.Target, a.Env, ephemeral, 0)
+	sess, err := h5.Open(a.Target, h5.OpenOptions{
+		Env:       a.Env,
+		Ephemeral: ephemeral,
+		Visible:   a.Visible != nil && *a.Visible,
+		Width:     a.Width,
+		Height:    a.Height,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +464,7 @@ func (s *Set) h5Open(_ context.Context, raw json.RawMessage) (any, error) {
 	return map[string]any{"session": id, "target": sess.Target()}, nil
 }
 
-func (s *Set) h5Eval(_ context.Context, raw json.RawMessage) (any, error) {
+func (s *Set) h5Eval(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a struct {
 		Session   string `json:"session"`
 		JS        string `json:"js"`
@@ -450,7 +477,7 @@ func (s *Set) h5Eval(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	result, err := sess.Eval(a.JS, time.Duration(a.TimeoutMS)*time.Millisecond)
+	result, err := sess.Eval(ctx, a.JS, time.Duration(a.TimeoutMS)*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
@@ -475,6 +502,32 @@ func (s *Set) h5Console(_ context.Context, raw json.RawMessage) (any, error) {
 	}
 	lines := sess.Console(clear)
 	return map[string]any{"count": len(lines), "lines": lines}, nil
+}
+
+func (s *Set) h5Screenshot(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+		Path    string `json:"path"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.h5Session(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	png, err := sess.Screenshot()
+	if err != nil {
+		return nil, err
+	}
+	caption := fmt.Sprintf("%s — %d bytes PNG", sess.Target(), len(png))
+	if a.Path != "" {
+		if err := os.WriteFile(a.Path, png, 0o644); err != nil {
+			return nil, fmt.Errorf("h5_screenshot: write %q: %w", a.Path, err)
+		}
+		caption = fmt.Sprintf("%s — saved to %s (%d bytes)", sess.Target(), a.Path, len(png))
+	}
+	return mcp.Image{MimeType: "image/png", Data: png, Caption: caption}, nil
 }
 
 func (s *Set) h5Close(_ context.Context, raw json.RawMessage) (any, error) {

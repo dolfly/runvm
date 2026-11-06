@@ -2,6 +2,7 @@ package h5
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,10 @@ type Session struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 
+	visible bool
+	display string
+	own     bool
+
 	mu      sync.Mutex
 	wmu     sync.Mutex // serializes writes to stdin: one line per JSON message
 	evalMu  sync.Mutex // one evaluation at a time: statement order is part of the API
@@ -46,12 +51,25 @@ type evalReply struct {
 	err    error
 }
 
+// OpenOptions configures one page host.
+type OpenOptions struct {
+	Env          map[string]string
+	Ephemeral    bool
+	Visible      bool // draw in a window (needed for screenshots)
+	Width        int
+	Height       int
+	ReadyTimeout time.Duration
+}
+
 // Open starts a page host for target (a URL, a file path, or about:blank) and
 // waits until its hooks are installed and the page is evaluable.
-func Open(target string, env map[string]string, ephemeral bool, readyTimeout time.Duration) (*Session, error) {
+func Open(target string, opts OpenOptions) (*Session, error) {
+	env := opts.Env
+	ephemeral := opts.Ephemeral
 	if target == "" {
 		target = "about:blank"
 	}
+	readyTimeout := opts.ReadyTimeout
 	if readyTimeout <= 0 {
 		readyTimeout = defaultReadyTimeout
 	}
@@ -64,6 +82,16 @@ func Open(target string, env map[string]string, ephemeral bool, readyTimeout tim
 	cmd.Env = append(os.Environ(), "RUNVM_HOST=1")
 	if ephemeral {
 		cmd.Env = append(cmd.Env, "RUNVM_EPHEMERAL=1")
+	}
+	if opts.Visible {
+		cmd.Env = append(cmd.Env, "RUNVM_VISIBLE=1")
+		// Start from a default viewport when the caller did not pick one:
+		// a zero-sized window draws nothing worth capturing.
+		w, h := opts.Width, opts.Height
+		if w <= 0 || h <= 0 {
+			w, h = 1280, 800
+		}
+		cmd.Env = append(cmd.Env, fmt.Sprintf("RUNVM_VIEWPORT=%dx%d", w, h))
 	}
 	if len(env) > 0 {
 		blob, err := json.Marshal(env)
@@ -88,6 +116,7 @@ func Open(target string, env map[string]string, ephemeral bool, readyTimeout tim
 	}
 
 	s := &Session{
+		visible: opts.Visible,
 		target:  target,
 		cmd:     cmd,
 		stdin:   stdin,
@@ -125,6 +154,10 @@ func (s *Session) readLoop(r io.Reader) {
 			s.deliver(msg)
 		case "ready":
 			s.readyOnce.Do(func() { close(s.ready) })
+		case "display":
+			s.mu.Lock()
+			s.display, s.own = msg.Text, msg.Own
+			s.mu.Unlock()
 		case "console", "exception":
 			s.appendLine(Line{Level: msg.Level, Text: msg.Text})
 		case "loaded":
@@ -164,7 +197,7 @@ func (s *Session) appendLine(l Line) {
 
 // Eval runs js in the page and returns webframe's formatted result. The
 // statement may be an expression or a block; webframe awaits promises.
-func (s *Session) Eval(js string, timeout time.Duration) (string, error) {
+func (s *Session) Eval(ctx context.Context, js string, timeout time.Duration) (string, error) {
 	if js == "" {
 		return "", errors.New("h5_eval: empty script")
 	}
@@ -203,6 +236,9 @@ func (s *Session) Eval(js string, timeout time.Duration) (string, error) {
 	select {
 	case r := <-ch:
 		return r.result, r.err
+	case <-ctx.Done():
+		s.dropPending(id)
+		return "", ctx.Err()
 	case <-s.done:
 		s.dropPending(id)
 		return "", errors.New("h5_eval: page closed before the result arrived")
@@ -228,6 +264,34 @@ func (s *Session) Console(clear bool) []Line {
 		s.lines = nil
 	}
 	return out
+}
+
+// Screenshot captures the page as PNG.
+//
+// Three things have to be true, and each has its own message because they are
+// fixed in different ways: the page must be drawn in a window (visible), the
+// host must own its display (so the capture is that page, not a desktop), and
+// the platform must be able to grab pixels at all.
+func (s *Session) Screenshot() ([]byte, error) {
+	if !s.visible {
+		return nil, errors.New("h5_screenshot: page is hidden; open it with \"visible\": true to capture it")
+	}
+	s.mu.Lock()
+	display, own := s.display, s.own
+	s.mu.Unlock()
+	if display == "" {
+		return nil, errors.New("h5_screenshot: the page host reported no display")
+	}
+	if !own {
+		return nil, errors.New("h5_screenshot: the page is drawing on an inherited display; run without DISPLAY (or under xvfb-run) so the capture is the page and not the desktop")
+	}
+	// A freshly ready page has layout but may not have painted: two animation
+	// frames plus a settle beat is enough for WebKit to put pixels on screen.
+	_, _ = s.Eval(context.Background(),
+		"new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))",
+		2*time.Second)
+	time.Sleep(120 * time.Millisecond)
+	return capturePNG(display)
 }
 
 // Target is the page this session opened.
