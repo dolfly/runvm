@@ -52,7 +52,7 @@ tar -xzf runvm_*.tar.gz 2>/dev/null || unzip runvm_*.zip
 ./runvm doctor
 ```
 
-Alpine/musl **不在**发布矩阵里:purego 无 cgo 只支持 glibc,musl 需要 zig + cgo 的独立工具链,见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+Alpine/musl **不在**发布矩阵里:purego 无 cgo 只支持 glibc,musl 需要 zig + cgo 的独立工具链,见 [现状与缺口](docs/roadmap.md)。
 
 ## Docker
 
@@ -138,7 +138,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `h5_screenshot` | 把页面截成 PNG 返回(Linux,需 `visible: true`) |
 | `h5_close` | 关闭页面宿主进程 |
 
-参数细节见 [docs/mcp.md](docs/mcp.md)。请求是**并发处理**的(不同会话互不阻塞),响应按 `id` 对应,可能乱序返回。`android_call` 的 `args` 支持三种形态,一条调用就能覆盖大多数 native 接口:
+参数细节见 [工具参考](docs/tools.md)。请求是**并发处理**的(不同会话互不阻塞),响应按 `id` 对应,可能乱序返回。`android_call` 的 `args` 支持三种形态,一条调用就能覆盖大多数 native 接口:
 
 ```jsonc
 {"args": [2, 3]}                    // 整数参数

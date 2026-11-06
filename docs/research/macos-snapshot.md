@@ -1,3 +1,8 @@
+---
+title: macOS snapshot 调研
+layout: page
+---
+
 # macOS snapshot: can glaze grow `Snapshot() ([]byte, error)` with purego only?
 
 Research note for the `runvm` screenshot/print fork. Answers whether

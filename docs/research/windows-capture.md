@@ -1,3 +1,8 @@
+---
+title: Windows 截图调研
+layout: page
+---
+
 # Windows capture: why `EnumWindows` finds "no window in this process"
 
 Research note for the Windows CI failure of `runvm selftest`. Nothing here changes

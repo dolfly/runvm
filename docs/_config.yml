@@ -1,0 +1,18 @@
+title: runvm
+description: 给模型用的测试环境 —— Android .so 与 H5 页面，通过 MCP 暴露
+lang: zh-CN
+theme: minima
+markdown: kramdown
+plugins:
+  - jekyll-relative-links
+  - jekyll-seo-tag
+relative_links:
+  enabled: true
+header_pages:
+  - index.md
+  - getting-started.md
+  - tools.md
+  - architecture.md
+  - operations.md
+  - roadmap.md
+show_excerpts: false
