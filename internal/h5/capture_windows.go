@@ -3,7 +3,6 @@
 package h5
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"image/png"
