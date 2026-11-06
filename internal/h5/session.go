@@ -312,11 +312,8 @@ func (s *Session) Screenshot() ([]byte, error) {
 	s.mu.Lock()
 	display, own := s.display, s.own
 	s.mu.Unlock()
-	if display == "" {
-		return nil, errors.New("h5_screenshot: the page host reported no display")
-	}
-	if !own {
-		return nil, errors.New("h5_screenshot: the page is drawing on an inherited display; run without DISPLAY (or under xvfb-run) so the capture is the page and not the desktop")
+	if err := captureSupported(own, display); err != nil {
+		return nil, fmt.Errorf("h5_screenshot: %w", err)
 	}
 	// A freshly ready page has layout but may not have painted: two animation
 	// frames plus a settle beat is enough for WebKit to put pixels on screen.

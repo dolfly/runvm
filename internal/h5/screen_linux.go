@@ -17,6 +17,16 @@ import (
 // Only the private Xvfb this process starts is ever captured: a session that
 // inherited a real DISPLAY refuses instead, because screenshotting a user's
 // desktop because they asked for a page capture is a bug, not a feature.
+func captureSupported(own bool, display string) error {
+	if display == "" {
+		return fmt.Errorf("screenshot: the page host reported no display")
+	}
+	if !own {
+		return fmt.Errorf("screenshot: the page is drawing on an inherited display; run without DISPLAY (or under xvfb-run) so the capture is the page and not the desktop")
+	}
+	return nil
+}
+
 func capturePNG(display string) ([]byte, error) {
 	xwd, err := exec.LookPath("xwd")
 	if err != nil {

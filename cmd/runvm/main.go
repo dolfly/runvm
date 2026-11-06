@@ -47,6 +47,9 @@ func main() {
 			}
 			env, ephemeral := h5.EnvFromHost()
 			os.Exit(h5.RunHost(target, env, ephemeral))
+		case "selftest":
+			selftest()
+			return
 		case "doctor":
 			report := doctor.Run(version)
 			report.Print(os.Stdout)
@@ -186,6 +189,7 @@ usage:
   runvm [mcp]           serve the MCP server on stdin/stdout
   runvm http [flags]    serve the same tools over MCP Streamable HTTP
   runvm doctor          probe this machine's backends
+  runvm selftest        open a page, screenshot it, and check it painted
   runvm version         print the version
   runvm web-host <url>  internal: host one page (spawned by h5_open)
 

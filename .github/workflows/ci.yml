@@ -138,3 +138,15 @@ jobs:
 
       - name: doctor (boots the platform webview)
         run: go run -tags unicorn ./cmd/runvm doctor
+
+      - name: selftest (open a page, capture it, check it painted)
+        shell: bash
+        run: |
+          set +e
+          go run -tags unicorn ./cmd/runvm selftest
+          code=$?
+          if [ "$code" -eq 2 ]; then
+            echo "screenshot not implemented on this platform yet (exit 2) — skipping"
+            exit 0
+          fi
+          exit "$code"
