@@ -47,6 +47,12 @@ type Server struct {
 	// being a polite no-op.
 	cancelMu sync.Mutex
 	cancels  map[string]context.CancelFunc
+
+	resourceMu      sync.Mutex
+	resources       []Resource
+	resourceListers []func() []Resource
+	promptMu        sync.Mutex
+	prompts         []Prompt
 }
 
 // NewServer creates an empty server. Tools are added before Serve.
@@ -109,7 +115,16 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			defer wg.Done()
 			defer func() { <-slots }()
 
-			resp := s.handle(ctx, buf)
+			// One writer, many goroutines: replies and progress share the
+			// mutex so a notification can never split a JSON line.
+			reqCtx := withEmitter(ctx, func(method string, params any) {
+				mu.Lock()
+				defer mu.Unlock()
+				if err := enc.Encode(map[string]any{"jsonrpc": JSONRPCVersion, "method": method, "params": params}); err != nil && writeErr == nil {
+					writeErr = err
+				}
+			})
+			resp := s.handle(reqCtx, buf)
 			if resp == nil {
 				return
 			}
@@ -147,6 +162,15 @@ func (s *Server) handle(ctx context.Context, line []byte) *Response {
 		return nil
 	}
 
+	// Progress rides on the request context: a transport installs the sink,
+	// the tool layer calls mcp.Notify, and a client that sent no token sees
+	// nothing at all.
+	if opts := progressToken(req.Params); opts != nil {
+		ctx = withNotifier(ctx, func(progress float64, message string) {
+			s.emit(ctx, progressParams{ProgressToken: opts, Progress: progress, Total: 1, Message: message})
+		})
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if !req.IsNotification() {
@@ -179,10 +203,14 @@ func (s *Server) dispatch(ctx context.Context, req *Request) (any, *RPCError) {
 		return s.listTools(), nil
 	case "tools/call":
 		return s.callTool(ctx, req.Params)
-	case "resources/list", "prompts/list":
-		// Declared absent in capabilities; answering empty beats an error
-		// for clients that probe unconditionally.
-		return map[string]any{"resources": []any{}, "prompts": []any{}}, nil
+	case "resources/list":
+		return s.listResources(), nil
+	case "resources/read":
+		return s.readResource(ctx, req.Params)
+	case "prompts/list":
+		return s.listPrompts(), nil
+	case "prompts/get":
+		return s.getPrompt(req.Params)
 	default:
 		return nil, rpcErrorf(CodeMethodNotFound, "method %q is not supported", req.Method)
 	}
@@ -193,12 +221,25 @@ func (s *Server) initialize(params json.RawMessage) any {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	_ = json.Unmarshal(params, &p)
+	capabilities := map[string]any{
+		"tools": map[string]any{"listChanged": false},
+	}
+	// Only advertise what is actually there: a client that sees resources or
+	// prompts will call them, and an empty catalog is a worse answer than not
+	// declaring the capability.
+	if len(s.allResources()) > 0 {
+		capabilities["resources"] = map[string]any{"listChanged": true}
+	}
+	s.promptMu.Lock()
+	hasPrompts := len(s.prompts) > 0
+	s.promptMu.Unlock()
+	if hasPrompts {
+		capabilities["prompts"] = map[string]any{"listChanged": false}
+	}
 	return map[string]any{
 		"protocolVersion": negotiateVersion(p.ProtocolVersion),
-		"capabilities": map[string]any{
-			"tools": map[string]any{"listChanged": false},
-		},
-		"serverInfo": map[string]any{"name": s.name, "version": s.version},
+		"capabilities":    capabilities,
+		"serverInfo":      map[string]any{"name": s.name, "version": s.version},
 		"instructions": "runvm exposes throwaway test environments: android_* drives " +
 			"a native Android .so inside golem's emulator, h5_* drives a real WebKit page " +
 			"through webframe. Open a session, call it, then close it.",
@@ -263,6 +304,43 @@ func toJSON(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+// emit writes a notification. Transports override it by installing their own
+// writer in the context; the default is a no-op so stdio callers never see
+// notifications they did not ask for.
+func (s *Server) emit(ctx context.Context, params progressParams) {
+	if f, ok := ctx.Value(emitKey{}).(func(method string, params any)); ok && f != nil {
+		f("notifications/progress", params)
+	}
+}
+
+// progressToken pulls _meta.progressToken out of a request's params.
+func progressToken(params json.RawMessage) any {
+	if len(params) == 0 {
+		return nil
+	}
+	var p struct {
+		Meta struct {
+			ProgressToken any `json:"progressToken"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil
+	}
+	if p.Meta.ProgressToken == nil {
+		return nil
+	}
+	if str, ok := p.Meta.ProgressToken.(string); ok && str == "" {
+		return nil
+	}
+	return p.Meta.ProgressToken
+}
+
+type emitKey struct{}
+
+func withEmitter(ctx context.Context, f func(method string, params any)) context.Context {
+	return context.WithValue(ctx, emitKey{}, f)
 }
 
 func (s *Server) registerCancel(id json.RawMessage, cancel context.CancelFunc) {

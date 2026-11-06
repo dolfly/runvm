@@ -117,6 +117,27 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 `android_open` 还可以开一个**引擎池**(`"pool": 4`):多个 AArch64 引擎共享 `.so` 的只读页,同一会话的调用就能真并行。默认 1,即一次一个调用。
 
+## 进度、资源、提示词
+
+**进度**:请求带 `_meta.progressToken` 就会收到 `notifications/progress`。stdio 直接交织在输出里;HTTP 会把该次 POST 升级成 SSE 流,先推进度再推结果。没带 token 的客户端行为完全不变。
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call",
+ "params":{"name":"h5_open","arguments":{"target":"…"},"_meta":{"progressToken":"t1"}}}
+→ {"method":"notifications/progress","params":{"progressToken":"t1","progress":0.4,"total":1,
+   "message":"h5_open: host started, waiting for the page"}}
+```
+
+**资源**(只读,按 URI 取):
+
+| URI | 内容 |
+|---|---|
+| `runvm://status` | 后端、限制、活跃会话(JSON) |
+| `runvm://tools` | 全部工具与 input schema(JSON) |
+| `runvm://screenshot/<session>` | 该会话最近一次截图(PNG blob),截过之后才出现 |
+
+**提示词**(带参数的模板,客户端 `prompts/get` 取):`smoke-test-page`(url / expectation)——加载、断言、截图、收 console、关闭;`inspect-native-lib`(so / symbol)——加载 .so、列导出、调一个函数。
+
 ## 会话治理
 
 长时间跑的服务最怕"模型忘了关"。两个开关:

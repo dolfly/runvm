@@ -33,6 +33,10 @@ type Session struct {
 	own      bool
 	lastUsed atomic.Int64
 
+	shotMu  sync.Mutex
+	shotPNG []byte
+	shotAt  time.Time
+
 	mu      sync.Mutex
 	wmu     sync.Mutex // serializes writes to stdin: one line per JSON message
 	evalMu  sync.Mutex // one evaluation at a time: statement order is part of the API
@@ -61,6 +65,9 @@ type OpenOptions struct {
 	Width        int
 	Height       int
 	ReadyTimeout time.Duration
+	// OnProgress, when set, is called at coarse stages of a page open. It
+	// runs on the caller's goroutine, between blocking waits.
+	OnProgress func(progress float64, message string)
 }
 
 // Open starts a page host for target (a URL, a file path, or about:blank) and
@@ -75,6 +82,13 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 	if readyTimeout <= 0 {
 		readyTimeout = defaultReadyTimeout
 	}
+	progress := func(p float64, msg string) {
+		if opts.OnProgress != nil {
+			opts.OnProgress(p, msg)
+		}
+	}
+	progress(0.05, "locating runvm binary")
+
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("h5_open: locate runvm binary: %w", err)
@@ -113,9 +127,11 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 	// The host's stderr carries WebKit/GTK noise and is not part of the
 	// protocol, so it goes straight to our stderr.
 	cmd.Stderr = os.Stderr
+	progress(0.2, "starting page host")
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("h5_open: start host: %w", err)
 	}
+	progress(0.4, "host started, waiting for the page")
 
 	s := &Session{
 		visible: opts.Visible,
@@ -133,6 +149,7 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 
 	select {
 	case <-s.ready:
+		progress(1, "page ready")
 		return s, nil
 	case <-s.done:
 		if lines := s.Console(false); len(lines) > 0 {
@@ -304,6 +321,25 @@ func (s *Session) Screenshot() ([]byte, error) {
 		2*time.Second)
 	time.Sleep(120 * time.Millisecond)
 	return capturePNG(display)
+}
+
+// SetLastScreenshot remembers the most recent capture, so it can be read back
+// as a resource instead of only through the tool result.
+func (s *Session) SetLastScreenshot(png []byte) {
+	s.shotMu.Lock()
+	defer s.shotMu.Unlock()
+	s.shotPNG = png
+	s.shotAt = time.Now()
+}
+
+// LastScreenshot returns the most recent capture and when it was taken.
+func (s *Session) LastScreenshot() ([]byte, time.Time, bool) {
+	s.shotMu.Lock()
+	defer s.shotMu.Unlock()
+	if s.shotPNG == nil {
+		return nil, time.Time{}, false
+	}
+	return s.shotPNG, s.shotAt, true
 }
 
 // Target is the page this session opened.

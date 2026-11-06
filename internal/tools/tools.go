@@ -206,7 +206,131 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Handler:     s.h5Close,
 	})
 
+	s.registerCatalog(srv)
 	return srv, s
+}
+
+// registerCatalog adds the read-only surface: live state as resources, and the
+// two workflows people actually run (test a page, poke a native library) as
+// prompts. Both are optional in MCP, so they are registered after the tools
+// and advertised only because they exist.
+func (s *Set) registerCatalog(srv *mcp.Server) {
+	srv.AddResource(mcp.Resource{
+		URI:         "runvm://tools",
+		Name:        "Tool catalog",
+		Description: "Every tool this server exposes, with its input schema, as JSON.",
+		MimeType:    "application/json",
+		Read: func(context.Context) (any, error) {
+			tools := make([]map[string]any, 0)
+			for _, t := range srv.Tools() {
+				tools = append(tools, map[string]any{
+					"name": t.Name, "description": t.Description, "inputSchema": t.InputSchema,
+				})
+			}
+			return map[string]any{"tools": tools}, nil
+		},
+	})
+
+	srv.AddResource(mcp.Resource{
+		URI:         "runvm://status",
+		Name:        "Server status",
+		Description: "Backends, limits and live sessions.",
+		MimeType:    "application/json",
+		Read: func(ctx context.Context) (any, error) {
+			return s.status(ctx, nil)
+		},
+	})
+
+	// Screenshots appear in the catalog only after one has been taken.
+	srv.AddResourceLister(func() []mcp.Resource {
+		out := make([]mcp.Resource, 0)
+		for _, id := range s.H5.IDs() {
+			sess, ok := s.H5.Get(id)
+			if !ok {
+				continue
+			}
+			if _, _, has := sess.LastScreenshot(); !has {
+				continue
+			}
+			sessionID := id
+			out = append(out, mcp.Resource{
+				URI:         "runvm://screenshot/" + sessionID,
+				Name:        "Screenshot " + sessionID,
+				Description: "Most recent capture of " + sess.Target(),
+				MimeType:    "image/png",
+				Read: func(context.Context) (any, error) {
+					s, ok := s.H5.Get(sessionID)
+					if !ok {
+						return nil, fmt.Errorf("screenshot: session %s is gone", sessionID)
+					}
+					png, _, has := s.LastScreenshot()
+					if !has {
+						return nil, fmt.Errorf("screenshot: session %s has none", sessionID)
+					}
+					return png, nil
+				},
+			})
+		}
+		return out
+	})
+
+	srv.AddPrompt(mcp.Prompt{
+		Name:        "smoke-test-page",
+		Description: "Drive a real WebKit page: load it, assert on the DOM, capture a screenshot, close.",
+		Arguments: []mcp.PromptArgument{
+			{Name: "url", Description: "URL or local file path to test", Required: true},
+			{Name: "expectation", Description: "What must be true once the page settles"},
+		},
+		Build: func(args map[string]string) (string, error) {
+			url, err := mcp.RequireArg(args, "url")
+			if err != nil {
+				return "", err
+			}
+			want := args["expectation"]
+			if want == "" {
+				want = "the page's main heading or a key element is present"
+			}
+			return fmt.Sprintf(`Test %s in a real browser with runvm.
+
+1. h5_open with {"target": %q, "visible": true}
+2. h5_wait_for until %q is true (use a selector if it is an element)
+3. h5_eval to read the state you care about and assert on it
+4. h5_screenshot with a path so the run leaves an artifact
+5. h5_console to collect any page errors; report them even if the assertions pass
+6. h5_close
+
+Report: what loaded, what the assertions saw, any console errors, the screenshot path.`, url, url, want), nil
+		},
+	})
+
+	srv.AddPrompt(mcp.Prompt{
+		Name:        "inspect-native-lib",
+		Description: "Load an Android .so in the emulator, list its exports, and call one.",
+		Arguments: []mcp.PromptArgument{
+			{Name: "so", Description: "Path to the .so", Required: true},
+			{Name: "symbol", Description: "Function to call (default: pick a simple one)"},
+		},
+		Build: func(args map[string]string) (string, error) {
+			so, err := mcp.RequireArg(args, "so")
+			if err != nil {
+				return "", err
+			}
+			symbol := args["symbol"]
+			if symbol == "" {
+				symbol = "(pick a small function from the export list)"
+			}
+			return fmt.Sprintf(`Inspect the native library %s with runvm.
+
+1. android_open with {"so": %q}
+2. android_symbols to see what is callable; say how many exports there are
+3. android_call %s with plausible arguments; pass {"buffer": n} for out-parameters
+4. If a result is surprising, android_hook the symbol to a constant and call it again to
+   confirm the call path rather than the implementation
+5. android_close
+
+Report: engine, export count, the call you made, the value, and anything that looked wrong.`, so, so, symbol), nil
+		},
+	})
 }
 
 // reserved reports whether another session would exceed the configured cap.
@@ -350,7 +474,7 @@ func (s *Set) androidDetails() []map[string]any {
 	return out
 }
 
-func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
+func (s *Set) androidOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a androidOpenArgs
 	if err := decode(raw, &a); err != nil {
 		return nil, err
@@ -364,6 +488,7 @@ func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
 	info, infoErr := android.Describe(a.SO)
 	exports, exportsErr := android.Exports(a.SO)
 
+	mcp.Notify(ctx, 0.1, "android_open: reading library")
 	sess, err := android.Open(a.SO, android.OpenOptions{
 		Engine:  a.Engine,
 		DEX:     a.DEX,
@@ -373,6 +498,7 @@ func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	mcp.Notify(ctx, 0.9, fmt.Sprintf("android_open: %d engine(s) ready", sess.PoolSize()))
 	id := s.Android.Add(sess)
 
 	out := map[string]any{
@@ -537,7 +663,7 @@ func (s *Set) androidSession(id string) (*android.Session, error) {
 	return sess, nil
 }
 
-func (s *Set) h5Open(_ context.Context, raw json.RawMessage) (any, error) {
+func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a struct {
 		Target    string            `json:"target"`
 		Env       map[string]string `json:"env"`
@@ -562,6 +688,9 @@ func (s *Set) h5Open(_ context.Context, raw json.RawMessage) (any, error) {
 		Visible:   a.Visible != nil && *a.Visible,
 		Width:     a.Width,
 		Height:    a.Height,
+		OnProgress: func(p float64, msg string) {
+			mcp.Notify(ctx, p, "h5_open: "+msg)
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -721,6 +850,7 @@ func (s *Set) h5Screenshot(_ context.Context, raw json.RawMessage) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	sess.SetLastScreenshot(png)
 	caption := fmt.Sprintf("%s — %d bytes PNG", sess.Target(), len(png))
 	if a.Path != "" {
 		if err := os.WriteFile(a.Path, png, 0o644); err != nil {

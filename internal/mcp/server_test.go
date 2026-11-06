@@ -153,3 +153,59 @@ func TestToJSONPassesStringsThrough(t *testing.T) {
 		t.Errorf("toJSON(map) = %q", got)
 	}
 }
+
+func TestProgressNotificationsOnStdio(t *testing.T) {
+	srv := NewServer("test", "0")
+	srv.Add(Tool{
+		Name:        "work",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			Notify(ctx, 0.5, "halfway")
+			return "done", nil
+		},
+	})
+	var out bytes.Buffer
+	line := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work","arguments":{},"_meta":{"progressToken":"tok-1"}}}`
+	if err := srv.Serve(context.Background(), strings.NewReader(line+"\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	var notes, replies []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("not JSON: %q", l)
+		}
+		if m["method"] == "notifications/progress" {
+			notes = append(notes, m)
+		} else {
+			replies = append(replies, m)
+		}
+	}
+	if len(notes) != 1 {
+		t.Fatalf("got %d progress notifications, want 1", len(notes))
+	}
+	params, _ := notes[0]["params"].(map[string]any)
+	if params["progressToken"] != "tok-1" || params["message"] != "halfway" {
+		t.Errorf("progress params = %v", params)
+	}
+	if len(replies) != 1 {
+		t.Fatalf("got %d replies, want 1", len(replies))
+	}
+}
+
+func TestNoProgressWithoutToken(t *testing.T) {
+	srv := NewServer("test", "0")
+	srv.Add(Tool{
+		Name:        "work",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			Notify(ctx, 0.5, "halfway")
+			return "done", nil
+		},
+	})
+	out := serve(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work","arguments":{}}}`)
+	if len(out) != 1 {
+		t.Fatalf("got %d messages, want only the reply", len(out))
+	}
+}

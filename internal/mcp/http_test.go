@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -179,5 +180,41 @@ func TestHealthz(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPProgressUsesSSE(t *testing.T) {
+	srv := newTestServer()
+	srv.Add(Tool{
+		Name:        "work",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			Notify(ctx, 0.5, "halfway")
+			return "done", nil
+		},
+	})
+	ts := httptest.NewServer(srv.Handler(HTTPOptions{}))
+	defer ts.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"work","arguments":{},"_meta":{"progressToken":"tok"}}}`
+	resp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	text := string(raw)
+	if !strings.Contains(text, "notifications/progress") || !strings.Contains(text, `"progressToken":"tok"`) {
+		t.Errorf("stream has no progress notification:\n%s", text)
+	}
+	if !strings.Contains(text, `"result"`) {
+		t.Errorf("stream has no final result:\n%s", text)
+	}
+	if strings.Count(text, "event: message") < 2 {
+		t.Errorf("want a progress event and a result event:\n%s", text)
 	}
 }

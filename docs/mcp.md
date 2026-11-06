@@ -209,6 +209,42 @@
 
 ---
 
+## 进度
+
+请求里带 `_meta.progressToken`(值可以是字符串或数字),服务端就会发 `notifications/progress`:
+
+```json
+{"jsonrpc":"2.0","method":"notifications/progress",
+ "params":{"progressToken":"t1","progress":0.4,"total":1,"message":"h5_open: host started, waiting for the page"}}
+```
+
+- stdio:通知与回复共用一把写锁,不会把 JSON 行劈开。
+- HTTP:该次 POST 的响应变成 `text/event-stream`,每帧 `event: message` + `data: <json>`,最后推结果并关闭。
+- 不带 token:完全静默。
+
+`h5_open` 会报 4 个阶段(定位二进制 → 启动宿主 → 等待页面 → ready);`android_open` 报"读库"与"引擎就绪"。
+
+## 资源
+
+| URI | MIME | 说明 |
+|---|---|---|
+| `runvm://status` | application/json | 后端、限制、会话 |
+| `runvm://tools` | application/json | 工具目录与 schema |
+| `runvm://screenshot/<session>` | image/png | 最近一次截图(blob),截过才存在 |
+
+`resources/read` 返回 `contents[]`,文本资源用 `text`,二进制用 `blob`(base64)。未知 URI 是 JSON-RPC 错误,不是空内容。
+
+## 提示词
+
+`prompts/list` 返回两个模板;`prompts/get` 用参数渲染成一条 user 消息:
+
+| 名称 | 参数 | 内容 |
+|---|---|---|
+| `smoke-test-page` | `url`(必填)、`expectation` | 打开 → wait_for → 断言 → 截图 → 收 console → 关闭 |
+| `inspect-native-lib` | `so`(必填)、`symbol` | android_open → symbols → call → 必要时 hook → close |
+
+缺必填参数会报错并点名是哪个。
+
 ## HTTP 传输
 
 stdio 之外,同一套工具可以从 `POST /mcp` 调用:

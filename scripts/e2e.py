@@ -56,6 +56,39 @@ class Client:
             raise SystemExit("server closed stdout")
         return json.loads(line)
 
+    def request(self, method, params=None):
+        """Send any JSON-RPC method; returns the raw reply (notifications skipped)."""
+        self.id += 1
+        rid = self.id
+        msg = {"jsonrpc": "2.0", "id": rid, "method": method}
+        if params is not None:
+            msg["params"] = params
+        self.p.stdin.write(json.dumps(msg) + "\n")
+        self.p.stdin.flush()
+        while True:
+            reply = self.recv()
+            if reply.get("method") == "notifications/progress":
+                continue
+            if reply.get("id") == rid:
+                return reply
+
+    def call_with_progress(self, name, token, **args):
+        """A tool call that opted into progress; returns (reply, notifications)."""
+        self.id += 1
+        rid = self.id
+        msg = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+               "params": {"name": name, "arguments": args, "_meta": {"progressToken": token}}}
+        self.p.stdin.write(json.dumps(msg) + "\n")
+        self.p.stdin.flush()
+        notes = []
+        while True:
+            reply = self.recv()
+            if reply.get("method") == "notifications/progress":
+                notes.append(reply)
+                continue
+            if reply.get("id") == rid:
+                return reply, notes
+
     def call(self, name, **args):
         self.send("tools/call", {"name": name, "arguments": args})
         return self.recv()
@@ -142,6 +175,49 @@ def main():
         expect(f"title {sid}", c.call("h5_eval", session=sid, js="document.title"), "runvm demo")
     for sid in sids:
         expect(f"close {sid}", c.call("h5_close", session=sid), '"closed"')
+
+    print("== progress, resources, prompts ==")
+    reply, notes = c.call_with_progress("h5_open", "tok-e2e", target="examples/h5/page.html")
+    session = json.loads(text(reply))["session"]
+    tokens = {n["params"]["progressToken"] for n in notes}
+    ok = len(notes) >= 2 and tokens == {"tok-e2e"}
+    print(f"{'ok  ' if ok else 'FAIL'} progress: {len(notes)} notifications for {sorted(tokens)}")
+    if not ok:
+        FAILED.append(f"progress: {len(notes)} notifications, tokens {tokens}")
+    expect("close", c.call("h5_close", session=session), '"closed"')
+
+    caps = c.request("initialize", {"protocolVersion": "2025-06-18"})["result"]["capabilities"]
+    ok = {"tools", "resources", "prompts"} <= set(caps)
+    print(f"{'ok  ' if ok else 'FAIL'} capabilities: {sorted(caps)}")
+    if not ok:
+        FAILED.append(f"capabilities: {sorted(caps)}")
+
+    resources = c.request("resources/list")["result"]["resources"]
+    uris = {r["uri"] for r in resources}
+    ok = {"runvm://tools", "runvm://status"} <= uris
+    print(f"{'ok  ' if ok else 'FAIL'} resources: {sorted(uris)}")
+    if not ok:
+        FAILED.append(f"resources: {sorted(uris)}")
+
+    status = c.request("resources/read", {"uri": "runvm://status"})
+    ok = "contents" in status["result"]
+    print(f"{'ok  ' if ok else 'FAIL'} status resource readable")
+    if not ok:
+        FAILED.append("status resource unreadable")
+
+    prompts = c.request("prompts/list")["result"]["prompts"]
+    names = {p["name"] for p in prompts}
+    ok = {"smoke-test-page", "inspect-native-lib"} <= names
+    print(f"{'ok  ' if ok else 'FAIL'} prompts: {sorted(names)}")
+    if not ok:
+        FAILED.append(f"prompts: {sorted(names)}")
+
+    got = c.request("prompts/get", {"name": "smoke-test-page", "arguments": {"url": "https://example.com"}})
+    body = got["result"]["messages"][0]["content"]["text"]
+    ok = "h5_open" in body and "https://example.com" in body
+    print(f"{'ok  ' if ok else 'FAIL'} prompt renders with its argument")
+    if not ok:
+        FAILED.append("prompt did not include the argument")
 
     print("== h5: wait_for ==")
     opened = c.call("h5_open", target="examples/h5/page.html")

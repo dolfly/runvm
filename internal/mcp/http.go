@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -97,6 +98,14 @@ func (s *Server) httpPost(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 
+	// A client that sent a progress token gets an SSE stream for this POST,
+	// which is how the transport carries notifications that precede the
+	// result. Everything else stays a plain JSON exchange.
+	if token := tokenOf([]byte(trimmed)); token != nil {
+		s.streamSSE(w, r, []byte(trimmed))
+		return
+	}
+
 	resp := s.handle(r.Context(), []byte(trimmed))
 	if resp == nil {
 		// Notifications get no body, per the transport spec.
@@ -143,4 +152,53 @@ func newSessionID() string {
 		return "runvm"
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// tokenOf extracts _meta.progressToken from a raw JSON-RPC message.
+func tokenOf(body []byte) any {
+	var req struct {
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil
+	}
+	return progressToken(req.Params)
+}
+
+// streamSSE answers one request with progress notifications followed by the
+// reply, then closes the stream.
+func (s *Server) streamSSE(w http.ResponseWriter, r *http.Request, body []byte) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		// No streaming support (rare): fall back to the plain exchange.
+		resp := s.handle(r.Context(), body)
+		if resp == nil {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	fl.Flush()
+
+	ctx := withEmitter(r.Context(), func(method string, params any) {
+		writeSSE(w, fl, map[string]any{"jsonrpc": JSONRPCVersion, "method": method, "params": params})
+	})
+	if resp := s.handle(ctx, body); resp != nil {
+		writeSSE(w, fl, resp)
+	}
+}
+
+func writeSSE(w io.Writer, fl http.Flusher, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", b)
+	fl.Flush()
 }
