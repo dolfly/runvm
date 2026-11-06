@@ -146,7 +146,7 @@ jobs:
           out=$(go run -tags unicorn ./cmd/runvm selftest 2>&1)
           code=$?
           echo "$out"
-          if [ "$code" -ne 0 ] && echo "$out" | grep -q "not supported"; then
+          if [ "$code" -ne 0 ] && echo "$out" | grep -q "not supported on this platform"; then
             echo "screenshot not implemented on this platform yet — skipping"
             exit 0
           fi

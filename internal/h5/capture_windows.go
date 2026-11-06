@@ -122,8 +122,18 @@ func ownWindow() (uintptr, error) {
 		}
 	}
 	if best.hwnd == 0 {
-		return 0, fmt.Errorf("screenshot: no window in this process (found %d candidates; "+
-			"open the page with visible: true)", len(cands))
+		// Diagnostics beat a bare failure: this is the one place where the
+		// environment (session 0, no desktop) can be the whole story.
+		session := uint32(0)
+		procProcessIdToSessionId.Call(uintptr(pid), uintptr(unsafe.Pointer(&session)))
+		total := 0
+		procEnumWindows.Call(syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
+			total++
+			return 1
+		}), 0)
+		return 0, fmt.Errorf("screenshot: no window in this process "+
+			"(pid %d, session %d, %d process windows, %d top-level windows system-wide; "+
+			"open the page with visible: true)", pid, session, len(cands), total)
 	}
 	return best.hwnd, nil
 }
