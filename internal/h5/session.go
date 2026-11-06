@@ -28,6 +28,7 @@ type Session struct {
 
 	mu      sync.Mutex
 	wmu     sync.Mutex // serializes writes to stdin: one line per JSON message
+	evalMu  sync.Mutex // one evaluation at a time: statement order is part of the API
 	seq     int
 	pending map[int]chan evalReply
 	lines   []Line
@@ -170,6 +171,11 @@ func (s *Session) Eval(js string, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+
+	// A page is single-threaded; two interleaved evaluations would make the
+	// order of side effects unpredictable, so callers queue here.
+	s.evalMu.Lock()
+	defer s.evalMu.Unlock()
 
 	s.mu.Lock()
 	if s.closed {

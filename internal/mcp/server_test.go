@@ -4,9 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 )
+
+// idOf reports the numeric id of a response, or 0 when it has none (a parse
+// error answers with a null id).
+func idOf(m map[string]any) float64 {
+	if v, ok := m["id"].(float64); ok {
+		return v
+	}
+	return 0
+}
 
 func newTestServer() *Server {
 	srv := NewServer("test", "0.1.0")
@@ -45,6 +55,9 @@ func serve(t *testing.T, srv *Server, lines ...string) []map[string]any {
 		}
 		got = append(got, m)
 	}
+	// Concurrent dispatch means replies may arrive in any order; JSON-RPC
+	// keys them by id, so the tests do too.
+	sort.Slice(got, func(i, j int) bool { return idOf(got[i]) < idOf(got[j]) })
 	return got
 }
 

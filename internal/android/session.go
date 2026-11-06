@@ -1,6 +1,7 @@
 package android
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,17 +12,41 @@ import (
 	"github.com/isesword/golem/emulator"
 )
 
-// Session is one loaded library plus its emulator instance.
+// maxPool bounds the engine pool. Each engine is a full guest process
+// (address space + JIT buffer), so this is a memory decision as much as a
+// concurrency one.
+const maxPool = 16
+
+// OpenOptions configures a session at creation.
+type OpenOptions struct {
+	Engine  string
+	DEX     string
+	Pool    int   // engines to warm; 1 = one call at a time
+	MaxUses int64 // recycle an engine after this many calls; 0 = never
+}
+
+// Session is one library plus a pool of emulators that have it loaded.
 //
-// golem's emulator is not safe for concurrent calls (it owns CPU and memory
-// state), so every entry point takes the mutex. Concurrency comes from having
-// several sessions, which is also how golem's own engine pool works.
+// golem's Emulator is not goroutine-safe: it owns CPU and memory state. The
+// Pool gives that invariant a home — an engine is lent to one caller at a
+// time, and concurrency scales by engine count instead of by locks. Pool size
+// 1 therefore means exactly "one call at a time", the same semantics a single
+// mutex-guarded emulator would have.
 type Session struct {
-	mu     sync.Mutex
-	emu    *emulator.Emulator
-	path   string
-	engine string
-	dex    string
+	path string
+	cfg  emulator.Config
+	opts OpenOptions
+	pool *emulator.Pool[*emulator.Emulator]
+
+	closeOnce sync.Once
+
+	// hooks are applied lazily: an engine learns about them the first time it
+	// is used after they were registered, so registering a hook never costs a
+	// reboot and never disturbs another engine's state.
+	hmu     sync.Mutex
+	hooks   map[string]uint64
+	version int
+	applied map[*emulator.Emulator]int // engine -> hook version it has applied
 }
 
 // AssetsDir resolves the bionic sysroot directory. RUNVM_ASSETS wins so a
@@ -42,11 +67,10 @@ func AssetsPresent(dir string) bool {
 	return err == nil && st.IsDir()
 }
 
-// Open boots an emulator with the library loaded and its initializers run.
-// engine selects the CPU backend ("" = golem's default).
-func Open(path, engine, dex string) (*Session, error) {
-	// An empty path boots bionic alone: no main library, which is what
-	// doctor probes with to separate "no engine" from "bad library".
+// Open boots a pool of emulators with the library loaded and its initializers
+// run. An empty path boots bionic alone (used by doctor to separate "no
+// engine" from "bad library").
+func Open(path string, opts OpenOptions) (*Session, error) {
 	if path != "" {
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("android_open: %q: %w", path, err)
@@ -56,33 +80,71 @@ func Open(path, engine, dex string) (*Session, error) {
 	if !AssetsPresent(assets) {
 		return nil, fmt.Errorf("android_open: bionic sysroot not found at %q: set RUNVM_ASSETS to golem's assets directory", assets)
 	}
-	emu, err := emulator.New(emulator.Config{
-		SOPath:      path,
-		AssetRoot:   assets,
-		Engine:      engine,
-		ProcessName: "runvm",
-	})
+	if opts.Pool <= 0 {
+		opts.Pool = 1
+	}
+	if opts.Pool > maxPool {
+		return nil, fmt.Errorf("android_open: pool %d exceeds the maximum of %d", opts.Pool, maxPool)
+	}
+
+	s := &Session{
+		path:    path,
+		opts:    opts,
+		hooks:   map[string]uint64{},
+		applied: map[*emulator.Emulator]int{},
+		cfg: emulator.Config{
+			SOPath:      path,
+			AssetRoot:   assets,
+			Engine:      opts.Engine,
+			ProcessName: "runvm",
+		},
+	}
+
+	pool, err := emulator.NewPool[*emulator.Emulator](opts.Pool, opts.MaxUses,
+		func() (*emulator.Emulator, error) {
+			emu, err := emulator.New(s.cfg)
+			if err != nil {
+				return nil, err
+			}
+			if opts.DEX != "" {
+				if _, err := emu.LoadDex(opts.DEX); err != nil {
+					_ = emu.Close()
+					return nil, fmt.Errorf("load dex %q: %w", opts.DEX, err)
+				}
+			}
+			return emu, nil
+		},
+		func(emu *emulator.Emulator) { _ = emu.Close() },
+	)
 	if err != nil {
 		return nil, fmt.Errorf("android_open: %s: %w (run `runvm doctor` if this mentions the engine or libunicorn)", path, err)
 	}
-	s := &Session{emu: emu, path: path, engine: emu.Engine(), dex: dex}
-	if dex != "" {
-		if _, err := emu.LoadDex(dex); err != nil {
-			_ = emu.Close()
-			return nil, fmt.Errorf("android_open: load dex %q: %w", dex, err)
-		}
-	}
+	s.pool = pool
 	return s, nil
 }
 
 // Path is the loaded library.
 func (s *Session) Path() string { return s.path }
 
-// Engine is the backend golem selected.
-func (s *Session) Engine() string { return s.engine }
+// Engine reports the backend golem selected. It borrows an engine to ask,
+// because the backend is only known once one is constructed.
+func (s *Session) Engine() string {
+	var engine string
+	ctx := context.Background()
+	if err := s.pool.Do(ctx, func(emu *emulator.Emulator) error {
+		engine = emu.Engine()
+		return nil
+	}); err != nil {
+		return "unknown"
+	}
+	return engine
+}
 
 // DEX is the optional classes.dex used for JNI metadata lookups.
-func (s *Session) DEX() string { return s.dex }
+func (s *Session) DEX() string { return s.opts.DEX }
+
+// PoolSize is the configured engine count.
+func (s *Session) PoolSize() int { return s.opts.Pool }
 
 // ArgKind distinguishes the three things a call argument can be.
 type ArgKind uint8
@@ -159,9 +221,8 @@ type Result struct {
 
 const maxBuffer = 1 << 20 // sanity cap: no test needs a 1 MiB out-parameter
 
-// Call invokes an exported symbol. golem supports up to 8 integer arguments
-// per call, which is also the practical ABI limit for this interface.
-func (s *Session) Call(symbol string, args []Arg) (Result, error) {
+// Call invokes an exported symbol on a pooled engine.
+func (s *Session) Call(ctx context.Context, symbol string, args []Arg) (Result, error) {
 	var res Result
 	if symbol == "" {
 		return res, errors.New("android_call: empty symbol")
@@ -169,68 +230,123 @@ func (s *Session) Call(symbol string, args []Arg) (Result, error) {
 	if len(args) > 8 {
 		return res, fmt.Errorf("android_call: %d arguments, at most 8 are supported", len(args))
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.emu == nil {
-		return res, errors.New("android_call: session is closed")
-	}
 
-	values := make([]emulator.Value, 0, len(args))
-	var buffers []struct {
-		addr uint64
-		size int
-	}
-	for _, a := range args {
-		switch a.Kind {
-		case ArgString:
-			values = append(values, emulator.Ptr(s.emu.WriteCStringAlloc(a.Str)))
-		case ArgBuffer:
-			if a.Size > maxBuffer {
-				return res, fmt.Errorf("android_call: buffer of %d bytes exceeds the %d byte cap", a.Size, maxBuffer)
-			}
-			addr, err := s.emu.Malloc(uint64(a.Size))
-			if err != nil {
-				return res, fmt.Errorf("android_call: allocate %d byte buffer: %w", a.Size, err)
-			}
-			values = append(values, emulator.Ptr(addr))
-			buffers = append(buffers, struct {
-				addr uint64
-				size int
-			}{addr, a.Size})
-		default:
-			values = append(values, emulator.Words(a.Word)...)
+	err := s.pool.Do(ctx, func(emu *emulator.Emulator) error {
+		if err := s.applyHooks(emu); err != nil {
+			return err
 		}
-	}
 
-	v, err := s.emu.CallSymbol(symbol, values...)
-	if err != nil {
-		return res, fmt.Errorf("android_call: %s: %w", symbol, err)
-	}
-	res.Value = v
-	for _, b := range buffers {
-		raw, err := s.emu.ReadBytes(b.addr, uint64(b.size))
+		type buf struct {
+			addr uint64
+			size int
+		}
+		var buffers []buf
+		values := make([]emulator.Value, 0, len(args))
+		for _, a := range args {
+			switch a.Kind {
+			case ArgString:
+				values = append(values, emulator.Ptr(emu.WriteCStringAlloc(a.Str)))
+			case ArgBuffer:
+				if a.Size > maxBuffer {
+					return fmt.Errorf("android_call: buffer of %d bytes exceeds the %d byte cap", a.Size, maxBuffer)
+				}
+				addr, err := emu.Malloc(uint64(a.Size))
+				if err != nil {
+					return fmt.Errorf("android_call: allocate %d byte buffer: %w", a.Size, err)
+				}
+				values = append(values, emulator.Ptr(addr))
+				buffers = append(buffers, buf{addr: addr, size: a.Size})
+			default:
+				values = append(values, emulator.Words(a.Word)...)
+			}
+		}
+
+		v, err := emu.CallSymbol(symbol, values...)
 		if err != nil {
-			return res, fmt.Errorf("android_call: read back buffer: %w", err)
+			return fmt.Errorf("android_call: %s: %w", symbol, err)
 		}
-		res.Buffers = append(res.Buffers, Buffer{
-			Size:  b.size,
-			Hex:   hexBytes(raw),
-			ASCII: printable(raw),
-		})
+		res.Value = v
+		for _, b := range buffers {
+			raw, err := emu.ReadBytes(b.addr, uint64(b.size))
+			if err != nil {
+				return fmt.Errorf("android_call: read back buffer: %w", err)
+			}
+			res.Buffers = append(res.Buffers, Buffer{Size: b.size, Hex: hexBytes(raw), ASCII: printable(raw)})
+		}
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
 	}
 	return res, nil
 }
 
-// Close tears the emulator down. Safe to call twice.
-func (s *Session) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.emu == nil {
+// Hook replaces an exported function with one that returns a constant.
+//
+// This is the cheapest way to take a dependency out of the picture: stub the
+// network call, the signature routine, the clock, and test the code around it.
+// golem interposes at execution, so the guest's own code is untouched and
+// every other symbol still resolves normally.
+func (s *Session) Hook(symbol string, returns uint64) error {
+	if symbol == "" {
+		return errors.New("android_hook: empty symbol")
+	}
+	s.hmu.Lock()
+	defer s.hmu.Unlock()
+	if old, ok := s.hooks[symbol]; ok && old != returns {
+		return fmt.Errorf("android_hook: %q is already stubbed to %d; open a new session to change it", symbol, old)
+	}
+	s.hooks[symbol] = returns
+	s.version++
+	return nil
+}
+
+// applyHooks installs any hooks this engine has not seen yet.
+//
+// Applying lazily keeps registration free (no reboot, no lost guest state) and
+// correct across pool rebuilds: a fresh engine starts at version 0 and catches
+// up the first time it is used.
+func (s *Session) applyHooks(emu *emulator.Emulator) error {
+	s.hmu.Lock()
+	want := s.version
+	if s.applied[emu] == want {
+		s.hmu.Unlock()
 		return nil
 	}
-	err := s.emu.Close()
-	s.emu = nil
-	return err
+	hooks := make(map[string]uint64, len(s.hooks))
+	for k, v := range s.hooks {
+		hooks[k] = v
+	}
+	s.hmu.Unlock()
+
+	for symbol, returns := range hooks {
+		ret := returns
+		if err := emu.ReplaceSymbol(symbol, func(*emulator.Hook) uint64 { return ret }); err != nil {
+			return fmt.Errorf("android_hook: %s: %w", symbol, err)
+		}
+	}
+
+	s.hmu.Lock()
+	s.applied[emu] = want
+	s.hmu.Unlock()
+	return nil
+}
+
+// Hooks lists the stubbed symbols and their return values.
+func (s *Session) Hooks() map[string]uint64 {
+	s.hmu.Lock()
+	defer s.hmu.Unlock()
+	out := make(map[string]uint64, len(s.hooks))
+	for k, v := range s.hooks {
+		out[k] = v
+	}
+	return out
+}
+
+// Close tears the pool down. Safe to call twice.
+func (s *Session) Close() error {
+	s.closeOnce.Do(func() { s.pool.CloseAll() })
+	return nil
 }
 
 func hexBytes(b []byte) string {

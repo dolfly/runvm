@@ -8,8 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
+
+// maxInFlight bounds concurrent requests. A model that fires fifty tool calls
+// at once gets backpressure here rather than fifty child processes.
+const maxInFlight = 32
 
 // DefaultToolTimeout bounds a single tools/call so a stuck backend cannot
 // wedge the session. Tools that need longer (a page load, a slow emulator
@@ -70,21 +75,51 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
 	enc := json.NewEncoder(out)
+	var (
+		mu       sync.Mutex // guards enc and writeErr
+		writeErr error
+		wg       sync.WaitGroup
+	)
+	slots := make(chan struct{}, maxInFlight)
+
+	// Requests run concurrently and answers may come back out of order, which
+	// JSON-RPC allows: a slow h5_open must not block a call against a session
+	// that is already open. Ordering that matters (a page's own script calls,
+	// one engine's calls) is enforced by the backend, not here.
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
-			return err
+			break
 		}
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
 			continue
 		}
-		resp := s.handle(ctx, line)
-		if resp == nil {
-			continue
-		}
-		if err := enc.Encode(resp); err != nil {
-			return fmt.Errorf("mcp: write response: %w", err)
-		}
+		buf := append([]byte(nil), line...)
+
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+
+			resp := s.handle(ctx, buf)
+			if resp == nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if err := enc.Encode(resp); err != nil && writeErr == nil {
+				writeErr = err
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	err := writeErr
+	mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("mcp: write response: %w", err)
 	}
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("mcp: read stdin: %w", err)

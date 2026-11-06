@@ -56,7 +56,7 @@ func Run(version string) Report {
 
 	if ok := android.AssetsPresent(assets); ok {
 		start := time.Now()
-		sess, err := android.Open("", "", "")
+		sess, err := android.Open("", android.OpenOptions{})
 		switch {
 		case err == nil:
 			_ = sess.Close()

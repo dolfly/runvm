@@ -51,6 +51,9 @@ func New(version string) (*mcp.Server, *Set) {
 			"so":     str("Path to the .so on this machine (AArch64, ARMv7 or x86_64)"),
 			"engine": str(`CPU backend: "unicorn" or empty for the default`),
 			"dex":    str("Optional classes.dex for real class/method metadata in JNI lookups"),
+			"pool": num("Engines to warm, 1-16 (default 1). Above 1, calls to this session run in parallel " +
+				"on separate engines that share the library's read-only pages"),
+			"max_uses": num("Recycle an engine after this many calls (default 0: never)"),
 		}, "so"),
 		Handler: s.androidOpen,
 	})
@@ -64,6 +67,19 @@ func New(version string) (*mcp.Server, *Set) {
 			"limit":   num("Maximum symbols to return (default 200)"),
 		}, "session"),
 		Handler: s.androidSymbols,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "android_hook",
+		Description: "Replace an exported function with one that returns a constant, so a dependency can be " +
+			"stubbed out while the rest of the library still runs for real. Re-hooking a symbol with a " +
+			"different value is refused: open a new session instead.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from android_open"),
+			"symbol":  str("Exported function to replace"),
+			"returns": num("Constant the stub returns"),
+		}, "session", "symbol", "returns"),
+		Handler: s.androidHook,
 	})
 
 	srv.Add(mcp.Tool{
@@ -158,16 +174,35 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 			"sessions": s.H5.Len(),
 		},
 		"sessions": map[string]any{
-			"android": s.Android.IDs(),
+			"android": s.androidDetails(),
 			"h5":      s.H5.IDs(),
 		},
 	}, nil
 }
 
 type androidOpenArgs struct {
-	SO     string `json:"so"`
-	Engine string `json:"engine"`
-	DEX    string `json:"dex"`
+	SO      string `json:"so"`
+	Engine  string `json:"engine"`
+	DEX     string `json:"dex"`
+	Pool    int    `json:"pool"`
+	MaxUses int64  `json:"max_uses"`
+}
+
+func (s *Set) androidDetails() []map[string]any {
+	ids := s.Android.IDs()
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		sess, ok := s.Android.Get(id)
+		if !ok {
+			continue
+		}
+		entry := map[string]any{"session": id, "pool": sess.PoolSize()}
+		if hooks := sess.Hooks(); len(hooks) > 0 {
+			entry["hooks"] = hooks
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
@@ -181,7 +216,12 @@ func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
 	info, infoErr := android.Describe(a.SO)
 	exports, exportsErr := android.Exports(a.SO)
 
-	sess, err := android.Open(a.SO, a.Engine, a.DEX)
+	sess, err := android.Open(a.SO, android.OpenOptions{
+		Engine:  a.Engine,
+		DEX:     a.DEX,
+		Pool:    a.Pool,
+		MaxUses: a.MaxUses,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +231,7 @@ func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
 		"session": id,
 		"path":    a.SO,
 		"engine":  sess.Engine(),
+		"pool":    sess.PoolSize(),
 	}
 	if infoErr == nil {
 		out["arch"] = info.Arch
@@ -233,7 +274,7 @@ func (s *Set) androidSymbols(_ context.Context, raw json.RawMessage) (any, error
 	return out, nil
 }
 
-func (s *Set) androidCall(_ context.Context, raw json.RawMessage) (any, error) {
+func (s *Set) androidCall(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a struct {
 		Session string `json:"session"`
 		Symbol  string `json:"symbol"`
@@ -250,7 +291,7 @@ func (s *Set) androidCall(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("android_call: %w", err)
 	}
-	res, err := sess.Call(a.Symbol, args)
+	res, err := sess.Call(ctx, a.Symbol, args)
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +305,28 @@ func (s *Set) androidCall(_ context.Context, raw json.RawMessage) (any, error) {
 		out["buffers"] = res.Buffers
 	}
 	return out, nil
+}
+
+func (s *Set) androidHook(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string  `json:"session"`
+		Symbol  string  `json:"symbol"`
+		Returns float64 `json:"returns"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.androidSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	if a.Returns < 0 || a.Returns != float64(uint64(a.Returns)) {
+		return nil, fmt.Errorf("android_hook: returns must be a non-negative integer")
+	}
+	if err := sess.Hook(a.Symbol, uint64(a.Returns)); err != nil {
+		return nil, err
+	}
+	return map[string]any{"hooked": a.Symbol, "returns": uint64(a.Returns), "hooks": sess.Hooks()}, nil
 }
 
 func (s *Set) androidClose(_ context.Context, raw json.RawMessage) (any, error) {

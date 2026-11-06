@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build build-plain test vet fmt fmt-check doctor clean
+.PHONY: build build-plain dist test vet fmt fmt-check doctor clean
 
 ## build: the real thing, with golem's unicorn engine compiled in
 build:
@@ -23,6 +23,10 @@ fmt:
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo "gofmt needed"; exit 1; }
+
+## dist: cross-compiled archives for every supported platform
+dist:
+	./scripts/release.sh $(VERSION)
 
 ## doctor: probe this machine by actually starting both backends
 doctor: build

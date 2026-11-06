@@ -43,7 +43,18 @@ flowchart TB
 
 `web-host` 里补了两件 webframe 库不做、但库的调用方必须自己做的事(它的 CLI 里做了):无 `DISPLAY` 时拉起私有 Xvfb,以及把本地路径转成 `file://` URL。
 
-## 快速开始
+## 安装
+
+从 [Releases](https://github.com/dolfly/runvm/releases) 下载对应平台(linux / darwin / windows × amd64 / arm64),解压即单个二进制,无 cgo 依赖:
+
+```bash
+tar -xzf runvm_*.tar.gz 2>/dev/null || unzip runvm_*.zip
+./runvm doctor
+```
+
+Alpine/musl **不在**发布矩阵里:purego 无 cgo 只支持 glibc,musl 需要 zig + cgo 的独立工具链,见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+
+## 从源码构建
 
 要求:Go 1.27+;Linux 额外需要 WebKitGTK 和 Xvfb(Android 后端需要 libunicorn)。
 
@@ -84,6 +95,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `runvm_status` | 两个后端是否可用、有几个会话(**不启动任何东西**) |
 | `android_open` | 加载 `.so`,跑 init,返回 `android-N` |
 | `android_symbols` | 列出导出函数(直接读 ELF,不依赖会话能否启动) |
+| `android_hook` | 把导出函数替换成"返回常量"的桩,用来摘掉依赖再测周边逻辑 |
 | `android_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `android_close` | 释放 emulator |
 | `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
@@ -91,13 +103,15 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `h5_console` | 取回缓冲的 console 与页面异常 |
 | `h5_close` | 关闭页面宿主进程 |
 
-参数细节见 [docs/mcp.md](docs/mcp.md)。`android_call` 的 `args` 支持三种形态,一条调用就能覆盖大多数 native 接口:
+参数细节见 [docs/mcp.md](docs/mcp.md)。请求是**并发处理**的(不同会话互不阻塞),响应按 `id` 对应,可能乱序返回。`android_call` 的 `args` 支持三种形态,一条调用就能覆盖大多数 native 接口:
 
 ```jsonc
 {"args": [2, 3]}                    // 整数参数
 {"args": ["hello"]}                 // char*,自动拷进 guest 内存
 {"args": [{"buffer": 64}, 20]}      // 出参:64 字节缓冲区,调用后读回 hex/ascii
 ```
+
+`android_open` 还可以开一个**引擎池**(`"pool": 4`):多个 AArch64 引擎共享 `.so` 的只读页,同一会话的调用就能真并行。默认 1,即一次一个调用。
 
 ## 环境变量
 
@@ -110,8 +124,8 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 ## 限制,以及它**不是**什么
 
 - **不是安全沙箱**。加载的 `.so` 在你的进程里被模拟执行,页面在真实 WebKit 里运行。只跑你信任的代码。
-- **一个页面一个进程**,`h5_open` 的成本约 0.5–1.5 秒;批量测试请复用会话。
-- **没有截图/PDF/网络拦截**。webframe 的 API 不提供,需要的话应该在 `web-host` 里加 CDP 或注入脚本,而不是假装有。
+- **一个页面一个进程**,`h5_open` 的成本约 0.5–1.5 秒;批量测试请复用会话。不同页面之间并行,同一个页面内的 `h5_eval` 串行(保证语句顺序)。
+- **没有截图/PDF/网络拦截**。webframe 的 API 不提供,而 glaze 启动 WebView 时不带调试端口,所以"正经接 CDP"也无从下手;三条可行路线在 [docs/ROADMAP.md](docs/ROADMAP.md),现在刻意不做而不是做个假的。
 - **macOS / Windows 未实测**。代码路径按 webframe/golem 的支持写好了(macOS 无需 Xvfb,Windows 需要 WebView2),但没有 CI 覆盖。
 - **`go.mod` 里有一条 `replace`**。webframe 把 glaze 钉在作者的 fork 上,而 Go 会忽略依赖里的 `replace`,所以本模块必须重复一遍;升级 webframe 时这里要跟着改。
 
