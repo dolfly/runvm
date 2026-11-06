@@ -1,0 +1,11 @@
+.git
+.github
+.gitignore
+bin/
+dist/
+.e2e/
+*.zip
+*.pdf
+*.png
+!docs/**/*.png
+!examples/**/*.png

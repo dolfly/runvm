@@ -54,6 +54,37 @@ tar -xzf runvm_*.tar.gz 2>/dev/null || unzip runvm_*.zip
 
 Alpine/musl **不在**发布矩阵里:purego 无 cgo 只支持 glibc,musl 需要 zig + cgo 的独立工具链,见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
+## Docker
+
+镜像里已经把两个后端要的东西装齐了:WebKitGTK、Xvfb + xauth、xwd(截图用)、Mesa 软件 GL、libunicorn,以及中文字体。**非 root**(uid 10001),`/work` 可写。
+
+```bash
+# 自检:会真的启动 WebKit 与 bionic
+docker run --rm ghcr.io/dolfly/runvm doctor
+
+# MCP over stdio(客户端按 docker run -i 的方式拉起)
+docker run --rm -i ghcr.io/dolfly/runvm
+
+# 远程访问:容器内绑 0.0.0.0,宿主机只暴露回环
+docker run --rm -p 127.0.0.1:8765:8765 \
+  -e RUNVM_TOKEN=$(openssl rand -hex 16) \
+  ghcr.io/dolfly/runvm http -addr 0.0.0.0:8765
+
+# 产物落在挂载目录里(截图 / PDF)
+docker run --rm -v "$PWD:/work" ghcr.io/dolfly/runvm ...
+```
+
+自己构建:
+
+```bash
+docker build -t runvm .
+docker run --rm runvm version
+```
+
+镜像几百 MB,几乎全是 WebKitGTK 与 CJK 字体——这是"不用自带引擎"的代价的另一面:引擎必须有,只是从宿主机借来了。
+
+> GHCR 的包默认是私有的。第一次发布后到 package 设置里把可见性改成 public,别人才能免登录拉取。
+
 ## 从源码构建
 
 要求:Go 1.27+;Linux 额外需要 WebKitGTK 和 Xvfb(Android 后端需要 libunicorn)。
