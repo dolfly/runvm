@@ -2,13 +2,17 @@
 
 按"现在能不能做、做了会不会骗人"排序,而不是按听起来是否带劲。
 
-## 1. H5 截图 / PDF(Linux 已通,macOS/Windows 待 fork)
+## 1. H5 截图 / PDF(Linux + Windows 已通,macOS 待做)
 
 **前置条件已达成**:CI 现在在 macOS 与 Windows 上跑 `doctor`,WKWebView 与 WebView2 都能在 runner 里启动并加载页面(macOS 3.6s、Windows 8.4s)。也就是说 fork 写出来之后**有地方能验证**,不必盲写。
 
 **现状**:`h5_screenshot` 在 Linux 上可用——页面开 `visible: true` 画进私有 Xvfb(屏幕=视口),`xwd` 抓根窗口,Go 里解 XWD 转 PNG。截到的一定是那个页面,不是桌面。
 
-**还没有**:macOS / Windows 的截图。PDF 走的是"截图 + 嵌入",所以只在能截图的平台上可用。
+**Windows 已通**:不是 fork,是 pid 找错了——窗口由 glaze 建在 `runvm web-host` 子进程里,而抓取在父进程里按自己的 pid 枚举,永远是 0。把宿主 pid 传下去就解决了(诊断过程见 [research/windows-capture.md](research/windows-capture.md))。
+
+**还没有**:macOS 的截图。调研结论:glaze 已经在生产代码里给 WebKit 的 completion handler 传过 Go block(`Find`),所以 ABI 不是问题;真正的工作量是**抓取必须搬进页面宿主进程**,而 webframe 不暴露它的 WebView——两个模块各要一个小改动。方案与 CI 验证清单见 [research/macos-snapshot.md](research/macos-snapshot.md)。
+
+PDF 走"截图 + 嵌入",所以只在能截图的平台上可用(Linux / Windows)。
 
 **为什么难**:webframe 没有截图或打印 API,而它底下的 glaze 启动 WebView 时既不开 CDP 端口也没有 `--remote-debugging-pipe`,所以"在 `web-host` 里接 CDP"这条路根本不通——没有可连的调试端点。三条真正可行的路:
 
