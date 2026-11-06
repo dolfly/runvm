@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,8 +59,13 @@ type Session struct {
 
 type evalReply struct {
 	result string
+	png    []byte
 	err    error
 }
+
+// errSnapshotUnsupported means the platform backend cannot rasterize the page,
+// so the caller should fall back to capturing the window.
+var errSnapshotUnsupported = errors.New("snapshot unsupported")
 
 // OpenOptions configures one page host.
 type OpenOptions struct {
@@ -206,7 +212,11 @@ func (s *Session) deliver(msg hostMsg) {
 		return
 	}
 	if msg.OK != nil && *msg.OK {
-		ch <- evalReply{result: msg.Result}
+		ch <- evalReply{result: msg.Result, png: msg.PNG}
+		return
+	}
+	if strings.Contains(msg.Error, "unsupported") {
+		ch <- evalReply{err: fmt.Errorf("%w: %s", errSnapshotUnsupported, msg.Error)}
 		return
 	}
 	ch <- evalReply{err: errors.New(msg.Error)}
@@ -299,6 +309,51 @@ func (s *Session) Console(clear bool) []Line {
 	return out
 }
 
+// snapshot asks the page host to rasterize itself. macOS is the only backend
+// that implements it; everywhere else this returns errSnapshotUnsupported and
+// the caller captures the window instead.
+func (s *Session) snapshot() ([]byte, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("h5_screenshot: session is closed")
+	}
+	s.seq++
+	id := s.seq
+	ch := make(chan evalReply, 1)
+	s.pending[id] = ch
+	s.mu.Unlock()
+
+	payload, err := json.Marshal(hostCmd{ID: id, Op: "snapshot"})
+	if err != nil {
+		return nil, fmt.Errorf("h5_screenshot: %w", err)
+	}
+	s.wmu.Lock()
+	_, werr := s.stdin.Write(append(payload, '\n'))
+	s.wmu.Unlock()
+	if werr != nil {
+		s.dropPending(id)
+		return nil, fmt.Errorf("h5_screenshot: write to host: %w", werr)
+	}
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err
+		}
+		if len(r.png) == 0 {
+			return nil, errors.New("h5_screenshot: host returned an empty image")
+		}
+		return r.png, nil
+	case <-s.done:
+		s.dropPending(id)
+		return nil, errors.New("h5_screenshot: page closed before the capture arrived")
+	case <-time.After(30 * time.Second):
+		s.dropPending(id)
+		return nil, errors.New("h5_screenshot: timed out waiting for the capture")
+	}
+}
+
 // Screenshot captures the page as PNG.
 //
 // Three things have to be true, and each has its own message because they are
@@ -306,6 +361,14 @@ func (s *Session) Console(clear bool) []Line {
 // host must own its display (so the capture is that page, not a desktop), and
 // the platform must be able to grab pixels at all.
 func (s *Session) Screenshot() ([]byte, error) {
+	// Native first: on macOS the page can rasterize itself, so no window and no
+	// display ownership are needed.
+	if png, err := s.snapshot(); err == nil {
+		return png, nil
+	} else if !errors.Is(err, errSnapshotUnsupported) {
+		return nil, err
+	}
+
 	if !s.visible {
 		return nil, errors.New("h5_screenshot: page is hidden; open it with \"visible\": true to capture it")
 	}

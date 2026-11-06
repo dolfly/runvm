@@ -24,6 +24,8 @@ type hostMsg struct {
 	Code  int    `json:"code,omitempty"`
 	Own   bool   `json:"own,omitempty"`
 
+	PNG    []byte `json:"png,omitempty"` // base64 on the wire, per encoding/json
+
 	ID     int    `json:"id,omitempty"`
 	OK     *bool  `json:"ok,omitempty"`
 	Result string `json:"result,omitempty"`

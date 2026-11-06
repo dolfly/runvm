@@ -1,10 +1,10 @@
-github.com/ebitengine/purego v0.11.1 h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=
-github.com/ebitengine/purego v0.11.1/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+github.com/dolfly/glaze v0.2.1 h1:q+SwhMrLoBcv51AJGraOZNGOxH+gTOsGPo6px0R8hK0=
+github.com/dolfly/glaze v0.2.1/go.mod h1:dwHyKQlawNYk1F95skbEQal++KXwnVwPFpf3fCU26iQ=
+github.com/dolfly/webframe-fork v0.2.0 h1:kKQpQzyn+x2WJvLjHpYYod1NaHBf9ObrLPZTp3m+3j8=
+github.com/dolfly/webframe-fork v0.2.0/go.mod h1:qjqWlUdDt1+2kGHQtm9+bLdAIKb6BUnzxu71vcJakc0=
+github.com/ebitengine/purego v0.11.3 h1:OB+JLpdm7ioymhyA+6s5kbb/uOuYycAgL8NNTFc5MLg=
+github.com/ebitengine/purego v0.11.3/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
 github.com/isesword/golem v0.2.1 h1:nrL6lEggHei+S8lFCKnD21/X1V1RmRlcIHK4R2/4cuo=
 github.com/isesword/golem v0.2.1/go.mod h1:J6laYrAknDfgSTe0r9tGo+NBgrM7KM0i41xZx7qgJ7g=
-github.com/progrium/glaze v0.0.0-20261029191355-bc7899dbb235 h1:aBLsy5MBFgj7ccxiZ9c3+WyNDFEH59mvks6K6iyveww=
-github.com/progrium/glaze v0.0.0-20261029191355-bc7899dbb235/go.mod h1:6entg9bLZvTDjEuVBX/tO2c4I1HlMPuerkpnVwIVFZo=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
 golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
-tractor.dev/webframe v0.0.0-20261030030822-25c24cb61aad h1:bU5B7vn44Lo8uaz90baJgLzDz5v2rlSt706x6dL0TaM=
-tractor.dev/webframe v0.0.0-20261030030822-25c24cb61aad/go.mod h1:bBxTyJRKcfRA2pQZJ5q03eB0ncGg5MwrDEjGf8N6MdA=

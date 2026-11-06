@@ -3,6 +3,7 @@ package h5
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -122,6 +123,24 @@ func RunHost(target string, env map[string]string, ephemeral bool) int {
 				<-ready // webframe requires Ready before Eval
 				id, js := cmd.ID, cmd.JS
 				f.Eval(js, func(res string, err error) { reply(id, res, err) })
+			case "snapshot":
+				// Must not run on the UI thread: the capture completes on the
+				// main queue, which this process is pumping.
+				id := cmd.ID
+				go func() {
+					png, err := f.Snapshot()
+					if err != nil {
+						ok := false
+						msg := hostMsg{ID: id, OK: &ok, Error: err.Error()}
+						if errors.Is(err, webframe.ErrSnapshotUnsupported) {
+							msg.Error = "unsupported: " + err.Error()
+						}
+						emit(msg)
+						return
+					}
+					ok := true
+					emit(hostMsg{ID: id, OK: &ok, PNG: png})
+				}()
 			case "close":
 				f.Terminate()
 				return
