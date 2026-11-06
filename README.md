@@ -227,11 +227,11 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
 
 - **不是安全沙箱**。加载的 `.so` 在你的进程里被模拟执行,页面在真实 WebKit 里运行。只跑你信任的代码。
 - **一个页面一个进程**,`h5_open` 的成本约 0.5–1.5 秒;批量测试请复用会话。不同页面之间并行,同一个页面内的 `h5_eval` 串行(保证语句顺序)。
-- **截图:Linux 与 Windows 可用,macOS 还没有**。
+- **截图:三个平台都可用**(Linux Xvfb+xwd / Windows PrintWindow / macOS WKWebView snapshot)。
   - Linux:页面用 `visible: true` 画进本进程自己起的 Xvfb(屏幕=视口),`xwd` 抓根窗口,Go 里解 XWD 转 PNG——拿到的一定是那个页面,不会误抓桌面。
   - Windows:`PrintWindow` + `PW_RENDERFULLCONTENT` 抓**页面宿主子进程**的窗口。这里踩过一个坑:窗口在子进程里,而抓取在父进程里运行,按自己的 pid 枚举永远找不到——现在把宿主的 pid 传下去。CI 实测 `640x400, 19 distinct colours`。
-  - macOS:需要 WKWebView 的 snapshot(block 回调),方案与验证路径见 [docs/research/macos-snapshot.md](docs/research/macos-snapshot.md)。
-  - 都没有 PDF(打印 API 未暴露)与网络拦截。
+  - macOS:走 WKWebView 自己的 `takeSnapshotWithConfiguration:completionHandler:`——页面自己栅格化,不需要窗口、不需要 display。由两个 fork 承载:`dolfly/glaze`(加 `Snapshotter` 旁路接口)和 `dolfly/webframe-fork`(`Frame.Snapshot()`),都按 tag 钉住。CI 在 macos-latest 上实测 `640x400, 2 distinct colours`。
+  - 没有网络拦截。PDF 是"截图 + 嵌入",所以三平台都有,但都是栅格 PDF。
 - **平台覆盖到"能启动",没到"全功能"**。CI 在 macOS(arm64)与 Windows(amd64)上跑 build + 单测 + `doctor`,`doctor` 会真的启动 WKWebView / WebView2 并加载一个页面(macOS 3.6s、Windows 8.4s 就绪),bionic 也都在 20ms 内启动。**但截图/PDF 仍只有 Linux**:那是唯一能自己起 Xvfb 抓屏的路径。
 - **`go.mod` 里有一条 `replace`**。webframe 把 glaze 钉在作者的 fork 上,而 Go 会忽略依赖里的 `replace`,所以本模块必须重复一遍;升级 webframe 时这里要跟着改。
 
