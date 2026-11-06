@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dolfly/runvm/internal/android"
@@ -200,6 +201,18 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	})
 
 	srv.Add(mcp.Tool{
+		Name: "h5_pdf",
+		Description: "Render the page into a single-page PDF and return its path. This is a raster PDF " +
+			"(the page is captured and embedded), not a vector print: WebView exposes no print API. " +
+			"The session must be open with visible=true on Linux.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from h5_open (opened with visible: true)"),
+			"path":    str("Where to write the PDF (default: <target-slug>.pdf in the working directory)"),
+		}, "session"),
+		Handler: s.h5PDF,
+	})
+
+	srv.Add(mcp.Tool{
 		Name:        "h5_close",
 		Description: "Close a page session and stop its host process.",
 		InputSchema: object(map[string]any{"session": str("Session id from h5_open")}, "session"),
@@ -268,6 +281,38 @@ func (s *Set) registerCatalog(srv *mcp.Server) {
 						return nil, fmt.Errorf("screenshot: session %s has none", sessionID)
 					}
 					return png, nil
+				},
+			})
+		}
+		return out
+	})
+
+	srv.AddResourceLister(func() []mcp.Resource {
+		out := make([]mcp.Resource, 0)
+		for _, id := range s.H5.IDs() {
+			sess, ok := s.H5.Get(id)
+			if !ok {
+				continue
+			}
+			if _, has := sess.LastPDF(); !has {
+				continue
+			}
+			sessionID := id
+			out = append(out, mcp.Resource{
+				URI:         "runvm://pdf/" + sessionID,
+				Name:        "PDF export " + sessionID,
+				Description: "Most recent PDF export of " + sess.Target(),
+				MimeType:    "application/pdf",
+				Read: func(context.Context) (any, error) {
+					s, ok := s.H5.Get(sessionID)
+					if !ok {
+						return nil, fmt.Errorf("pdf: session %s is gone", sessionID)
+					}
+					doc, has := s.LastPDF()
+					if !has {
+						return nil, fmt.Errorf("pdf: session %s has none", sessionID)
+					}
+					return doc, nil
 				},
 			})
 		}
@@ -832,6 +877,58 @@ func (s *Set) h5WaitFor(ctx context.Context, raw json.RawMessage) (any, error) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func (s *Set) h5PDF(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+		Path    string `json:"path"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.h5Session(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := sess.PDF()
+	if err != nil {
+		return nil, err
+	}
+	path := a.Path
+	if path == "" {
+		path = fmt.Sprintf("%s.pdf", slug(sess.Target()))
+	}
+	if err := os.WriteFile(path, doc, 0o644); err != nil {
+		return nil, fmt.Errorf("h5_pdf: write %q: %w", path, err)
+	}
+	return map[string]any{
+		"pdf":   path,
+		"bytes": len(doc),
+		"note":  "raster PDF: the page was captured and embedded, not printed",
+	}, nil
+}
+
+// slug turns a URL or path into something safe to use as a file name.
+func slug(target string) string {
+	if i := strings.LastIndexAny(target, "/\\"); i >= 0 && i+1 < len(target) {
+		target = target[i+1:]
+	}
+	target = strings.TrimSuffix(target, ".html")
+	var b strings.Builder
+	for _, r := range target {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "page"
+	}
+	return out
 }
 
 func (s *Set) h5Screenshot(_ context.Context, raw json.RawMessage) (any, error) {

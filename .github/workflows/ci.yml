@@ -91,3 +91,33 @@ jobs:
           RUNVM_ASSETS: /tmp/golem/assets
           HOME: /tmp
         run: python3 scripts/e2e.py /tmp/golem/examples/native/native.so
+
+  platforms:
+    # The Linux job proves the backends work end to end; this one proves the
+    # code builds and bootstraps where runvm is meant to run but a Linux box
+    # cannot check: WKWebView on macOS, WebView2 on Windows. It is the
+    # precondition for ever touching the screenshot/print fork.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build (unicorn engine)
+        run: go build -tags unicorn ./...
+
+      - name: test (unit only, no backends)
+        run: go test ./internal/mcp/ ./internal/session/ ./internal/android/
+
+      - name: version
+        run: go run -tags unicorn ./cmd/runvm version
+
+      - name: doctor (boots the platform webview)
+        run: go run -tags unicorn ./cmd/runvm doctor

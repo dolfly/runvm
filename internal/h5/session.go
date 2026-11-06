@@ -2,10 +2,13 @@ package h5
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/png" // registers the PNG decoder used by PDF()
 	"io"
 	"os"
 	"os/exec"
@@ -36,6 +39,7 @@ type Session struct {
 	shotMu  sync.Mutex
 	shotPNG []byte
 	shotAt  time.Time
+	pdfDoc  []byte
 
 	mu      sync.Mutex
 	wmu     sync.Mutex // serializes writes to stdin: one line per JSON message
@@ -340,6 +344,37 @@ func (s *Session) LastScreenshot() ([]byte, time.Time, bool) {
 		return nil, time.Time{}, false
 	}
 	return s.shotPNG, s.shotAt, true
+}
+
+// PDF renders the page into a single-page PDF by capturing it and embedding the
+// image; see encodePDF for why it is raster rather than vector.
+func (s *Session) PDF() ([]byte, error) {
+	capture, err := s.Screenshot()
+	if err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(bytes.NewReader(capture))
+	if err != nil {
+		return nil, fmt.Errorf("h5_pdf: decode capture: %w", err)
+	}
+	doc, err := encodePDF(img, 92)
+	if err != nil {
+		return nil, err
+	}
+	s.shotMu.Lock()
+	s.pdfDoc = doc
+	s.shotMu.Unlock()
+	return doc, nil
+}
+
+// LastPDF returns the most recent PDF export.
+func (s *Session) LastPDF() ([]byte, bool) {
+	s.shotMu.Lock()
+	defer s.shotMu.Unlock()
+	if s.pdfDoc == nil {
+		return nil, false
+	}
+	return s.pdfDoc, true
 }
 
 // Target is the page this session opened.

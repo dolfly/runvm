@@ -246,6 +246,25 @@ def main():
         os.remove(shot_path)
     expect("close visible", c.call("h5_close", session=sid), '"closed"')
 
+    print("== h5: PDF ==")
+    opened = c.call("h5_open", target="examples/h5/page.html", visible=True)
+    sid = json.loads(text(opened))["session"]
+    pdf_path = "e2e-page.pdf"
+    c.call("h5_pdf", session=sid, path=pdf_path)
+    data = open(pdf_path, "rb").read() if os.path.exists(pdf_path) else b""
+    ok = data.startswith(b"%PDF-1.4") and data.rstrip().endswith(b"%%EOF") and len(data) > 5000
+    print(f"{'ok  ' if ok else 'FAIL'} pdf written: {len(data)} bytes")
+    if not ok:
+        FAILED.append(f"pdf file: {len(data)} bytes, header {data[:8]!r}")
+    uris = {r["uri"] for r in c.request("resources/list")["result"]["resources"]}
+    ok = f"runvm://pdf/{sid}" in uris
+    print(f"{'ok  ' if ok else 'FAIL'} pdf resource listed: runvm://pdf/{sid}")
+    if not ok:
+        FAILED.append(f"pdf resource missing from {sorted(uris)}")
+    if os.path.exists(pdf_path):
+        os.remove(pdf_path)
+    expect("close pdf", c.call("h5_close", session=sid), '"closed"')
+
     c.close()
 
     if FAILED:
