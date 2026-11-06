@@ -3,7 +3,10 @@
 # Build stage: pure Go, no cgo. webframe loads the system WebView and golem
 # loads libunicorn at runtime through purego, so the build needs no C toolchain
 # and the binary carries no bundled engine.
-FROM golang:1.27-bookworm AS build
+# BUILDPLATFORM keeps the Go compiler on the host architecture even when the
+# target is arm64: Go cross-compiles, so nothing has to run under QEMU except
+# the runtime stage's package installation.
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -11,7 +14,9 @@ RUN go mod download
 
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -tags unicorn -trimpath \
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags unicorn -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/runvm ./cmd/runvm
 
@@ -22,7 +27,7 @@ RUN mkdir -p /out/assets && \
     ls /out/assets/android/sdk23/lib64/libc.so >/dev/null
 
 # Runtime stage: the libraries the two backends need, and nothing else.
-FROM debian:bookworm-slim
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="runvm" \
