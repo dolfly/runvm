@@ -54,13 +54,23 @@ jobs:
           cache: true
 
       - name: webkit + xvfb
+        # Non-interactive matters: needrestart can block an apt step forever
+        # on these images, which is indistinguishable from a slow mirror.
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
+        timeout-minutes: 10
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri
+          sudo -E apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri
 
       - name: libunicorn
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
+        timeout-minutes: 5
         run: |
-          if sudo apt-get install -y -qq libunicorn2; then
+          if sudo -E apt-get install -y -qq libunicorn2; then
             echo "using the distro libunicorn"
           else
             echo "no distro package; taking the one from the python wheel"
@@ -76,6 +86,7 @@ jobs:
         run: make build
 
       - name: e2e
+        timeout-minutes: 10
         env:
           RUNVM_ASSETS: /tmp/golem/assets
           HOME: /tmp
