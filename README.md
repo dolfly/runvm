@@ -1,5 +1,7 @@
 # runvm
 
+**文档站:<https://dolfly.github.io/runvm/>** · 产品介绍、快速开始、工具参考、架构与运维
+
 把「虚拟测试环境」做成模型能直接调用的工具:一套 MCP 服务器,两个后端。
 
 - **Android**:用 [golem](https://github.com/isesword/golem) 在本机加载一个 AArch64 的 `.so`,跑它的 `init_array` / `JNI_OnLoad`,然后把导出函数直接调用起来——不需要 JVM、不需要真机、不需要 adb。
