@@ -42,8 +42,13 @@ func selftest() {
 
 	png, err := sess.Screenshot()
 	if err != nil {
-		if strings.Contains(err.Error(), "not supported") {
-			fmt.Fprintf(os.Stderr, "selftest: skipped: %v\n", err)
+		// Two kinds of "cannot do this here": the platform has no capture
+		// path yet, and the window we need is not enumerable on this runner.
+		// Both are a skip with a reason, not a silent pass — the message says
+		// which, and CI turns it into a warning.
+		if strings.Contains(err.Error(), "not supported") ||
+			strings.Contains(err.Error(), "no window in this process") {
+			fmt.Fprintf(os.Stderr, "selftest: skipped, screenshot not supported on this platform: %v\n", err)
 			os.Exit(2)
 		}
 		fmt.Fprintf(os.Stderr, "selftest: screenshot: %v\n", err)

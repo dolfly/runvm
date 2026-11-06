@@ -156,7 +156,8 @@ jobs:
           code=$?
           echo "$out"
           if [ "$code" -ne 0 ] && echo "$out" | grep -q "not supported on this platform"; then
-            echo "screenshot not implemented on this platform yet — skipping"
+            echo "::warning::screenshot not supported on this platform yet"
+            echo "screenshot not supported on this platform yet — skipping"
             exit 0
           fi
           exit "$code"
