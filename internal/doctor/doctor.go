@@ -67,7 +67,7 @@ func Run(version string) Report {
 			// Booting with no main library is the shallowest possible test:
 			// if this fails, the engine itself is unavailable.
 			r.Checks = append(r.Checks, Check{Name: "cpu engine", OK: false, Detail: err.Error(),
-				Hint: "install libunicorn2 and build with -tags unicorn"})
+				Hint: engineHint()})
 		}
 	}
 
@@ -91,6 +91,18 @@ func Run(version string) Report {
 }
 
 // Print renders the report for a terminal.
+// engineHint names the install for the platform instead of guessing.
+func engineHint() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "brew install unicorn, or set GOLEM_UNICORN to libunicorn.dylib"
+	case "windows":
+		return "set GOLEM_UNICORN to unicorn.dll (golem ships one under assets\\windows\\<arch>)"
+	default:
+		return "apt install libunicorn2, or set GOLEM_UNICORN to libunicorn.so.2"
+	}
+}
+
 func (r Report) Print(w io.Writer) {
 	status := "ok"
 	if !r.OK() {

@@ -116,6 +116,23 @@ jobs:
       - name: test (unit only, no backends)
         run: go test ./internal/mcp/ ./internal/session/ ./internal/android/
 
+      - name: unicorn (macOS)
+        if: runner.os == 'macOS'
+        # golem probes /opt/homebrew/opt/unicorn/lib itself, so installing the
+        # formula is enough to make the Android backend real on this runner.
+        run: brew install unicorn
+
+      - name: unicorn (Windows)
+        if: runner.os == 'Windows'
+        # The DLL ships inside golem's module; point golem at it explicitly,
+        # since its default relative lookup is resolved from the cwd.
+        shell: pwsh
+        run: |
+          $dir = go list -m -f '{{.Dir}}' github.com/isesword/golem
+          $dll = Join-Path $dir 'assets\windows\amd64\unicorn.dll'
+          if (-not (Test-Path $dll)) { throw "no unicorn.dll at $dll" }
+          "GOLEM_UNICORN=$dll" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: version
         run: go run -tags unicorn ./cmd/runvm version
 
