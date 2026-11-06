@@ -22,7 +22,7 @@ PDF 走"截图 + 嵌入",所以只在能截图的平台上可用(Linux / Windows
 | B. Linux X11 抓屏 | 用 `Window: true` 把窗口映射到 Xvfb,再 `xwd`/`import` 抓根窗口 | 只有 Linux;要装 X11 工具;隐藏模式抓不到任何东西 |
 | C. 另开一个无头 Chrome | 用已装的 Chrome 对**同一个 URL** 截图 | 抓到的是重放,不是当前会话状态——对"测完再截图"这种需求是假的 |
 
-Linux 选了 B 的变体(私有 Xvfb + xwd + 纯 Go 解码,不需要 ImageMagick)。**macOS/Windows 只能走 A**,要接受 fork 成本;在那之前宁可报"不支持"也不做 C。
+Linux 选了 B 的变体(私有 Xvfb + xwd + 纯 Go 解码,不需要 ImageMagick);Windows 连 A 都不需要——`PrintWindow` 加上"窗口在子进程里"这个修正就够了。**只剩 macOS 要走 A**,要接受 fork 成本;在那之前宁可报"不支持"也不做 C。
 
 PDF 三平台都需要打印 API,glaze 没有暴露,同样卡在 A。
 
@@ -55,6 +55,6 @@ purego 在无 cgo 时只支持 glibc,golem 与 webframe 都靠它 `dlopen` 系�
 
 ## 6. 测试(已完成一半)
 
-单元测试覆盖 5 个包(mcp / session / android:args + JNI 桩);`scripts/e2e.py` 会真开 emulator 和 WebView,断言 17 项。
+单元测试 38 个,覆盖 9 个包里的 8 个(mcp 的传输/进度/资源/提示词/取消、h5 的 XWD 解码与 PDF、android 的参数与 JNI 桩、session 存储、tools 注册);`scripts/e2e.py` 会真开 emulator 和 WebView,断言 39 项。
 
 CI 里新增 `e2e` job:装 WebKitGTK + Xvfb + libunicorn(发行版没有就从 Python wheel 取),clone golem 拿 sysroot 和 `native.so`,然后跑同一份脚本。夹具因此不用 vendored 进仓库。
