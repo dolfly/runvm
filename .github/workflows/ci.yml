@@ -61,8 +61,17 @@ jobs:
           NEEDRESTART_MODE: a
         timeout-minutes: 10
         run: |
-          sudo apt-get update -qq
-          sudo -E apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri x11-apps
+          # apt has hung on these runners twice; bound each attempt and retry.
+          for attempt in 1 2 3; do
+            echo "apt attempt $attempt"
+            if timeout 240 sudo apt-get update -qq &&
+               timeout 400 sudo -E apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri x11-apps; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "apt failed three times"
+          exit 1
 
       - name: libunicorn
         env:
