@@ -37,6 +37,7 @@ type Session struct {
 	cfg  emulator.Config
 	opts OpenOptions
 	pool *emulator.Pool[*emulator.Emulator]
+	jni  *jniHandler
 
 	closeOnce sync.Once
 
@@ -87,16 +88,23 @@ func Open(path string, opts OpenOptions) (*Session, error) {
 		return nil, fmt.Errorf("android_open: pool %d exceeds the maximum of %d", opts.Pool, maxPool)
 	}
 
+	jni := newJNI()
 	s := &Session{
 		path:    path,
 		opts:    opts,
 		hooks:   map[string]uint64{},
 		applied: map[*emulator.Emulator]int{},
+		jni:     jni,
 		cfg: emulator.Config{
 			SOPath:      path,
 			AssetRoot:   assets,
 			Engine:      opts.Engine,
 			ProcessName: "runvm",
+			// Config.Android is deprecated in favour of a typed platform
+			// config, but that constructor lives in golem's internal tree, so
+			// the legacy field is the only way in from another module. The
+			// shim converts it once, at options normalization.
+			Android: emulator.AndroidConfig{JNI: jni},
 		},
 	}
 
@@ -342,6 +350,31 @@ func (s *Session) Hooks() map[string]uint64 {
 	}
 	return out
 }
+
+// Stats reports pool occupancy, so a long test run can be watched instead of
+// guessed at.
+func (s *Session) Stats() emulator.PoolStats { return s.pool.Stats() }
+
+// JavaStub answers a Java callback the guest's JNIEnv makes, so a library that
+// expects a real Android runtime can be exercised without one. The value is
+// coerced at each call site: a string answers object calls, a number answers
+// int/long/boolean calls, nil answers "no such object".
+//
+// Stubs are consulted by every engine in the pool immediately; unlike symbol
+// hooks they need no per-engine installation.
+func (s *Session) JavaStub(class, method string, v any) (jniStub, error) {
+	st, err := stubFromValue(class, method, v)
+	if err != nil {
+		return st, err
+	}
+	if err := s.jni.put(st); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
+// JavaStubs lists the registered Java stubs.
+func (s *Session) JavaStubs() []jniStub { return s.jni.list() }
 
 // Close tears the pool down. Safe to call twice.
 func (s *Session) Close() error {

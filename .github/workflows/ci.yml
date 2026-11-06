@@ -39,3 +39,44 @@ jobs:
 
       - name: test
         run: go test ./...
+
+  e2e:
+    # The unit tests never boot an emulator or a browser, so this job is the
+    # only thing standing between us and "works on my machine": real WebKit, a
+    # real Xvfb, a real unicorn, a real AArch64 library.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: webkit + xvfb
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri
+
+      - name: libunicorn
+        run: |
+          if sudo apt-get install -y -qq libunicorn2; then
+            echo "using the distro libunicorn"
+          else
+            echo "no distro package; taking the one from the python wheel"
+            python3 -m pip install --quiet --user unicorn
+            LIB=$(python3 -c 'import os,unicorn;print(os.path.join(os.path.dirname(unicorn.__file__),"lib","libunicorn.so.2"))')
+            echo "GOLEM_UNICORN=$LIB" >> "$GITHUB_ENV"
+          fi
+
+      - name: fixture (golem sysroot + sample .so)
+        run: git clone --depth 1 https://github.com/isesword/golem /tmp/golem
+
+      - name: build
+        run: make build
+
+      - name: e2e
+        env:
+          RUNVM_ASSETS: /tmp/golem/assets
+          HOME: /tmp
+        run: python3 scripts/e2e.py /tmp/golem/examples/native/native.so

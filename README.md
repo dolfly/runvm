@@ -17,7 +17,7 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>9 个工具"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>12 个工具"]
   S --> REG["session.Store<br/>android-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
   REG --> H["h5 后端<br/>进程外"]
@@ -96,6 +96,8 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `android_open` | 加载 `.so`,跑 init,返回 `android-N` |
 | `android_symbols` | 列出导出函数(直接读 ELF,不依赖会话能否启动) |
 | `android_hook` | 把导出函数替换成"返回常量"的桩,用来摘掉依赖再测周边逻辑 |
+| `android_java_stub` | 应答库通过 JNI 发起的 Java 回调(如 `System.currentTimeMillis`),不需要真 Android |
+| `android_java_stubs` | 列出当前会话应答了哪些 Java 回调 |
 | `android_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `android_close` | 释放 emulator |
 | `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
@@ -144,9 +146,9 @@ make fmt
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   9 个工具的参数校验与调用编排
+internal/tools/   12 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
-internal/android/ golem 会话 + ELF 导出表
+internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/h5/      webframe 宿主(子进程)与驱动
 internal/doctor/  真实探测两个后端
 ```

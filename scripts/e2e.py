@@ -89,6 +89,17 @@ def main():
     expect("hook fib->42", c.call("android_hook", session="android-1", symbol="fib", returns=42), '"returns": 42')
     expect("fib after hook", c.call("android_call", session="android-1", symbol="fib", args=[20]), '"value": 42')
     expect("add(2,3) untouched", c.call("android_call", session="android-1", symbol="add", args=[2, 3]), '"value": 5')
+    expect("java stub (long)", c.call("android_java_stub", session="android-1",
+                                      **{"class": "java/lang/System", "method": "currentTimeMillis",
+                                         "returns": 1700000000000}), "currentTimeMillis")
+    expect("java stub (string)", c.call("android_java_stub", session="android-1",
+                                        **{"class": "android.content.Context", "method": "getPackageName",
+                                           "returns": "com.example.app"}), "com.example.app")
+    expect("java stubs listed", c.call("android_java_stubs", session="android-1"), "getPackageName")
+    expect("duplicate stub refused", c.call("android_java_stub", session="android-1",
+                                            **{"class": "java/lang/System", "method": "currentTimeMillis",
+                                               "returns": 1}), "already registered")
+    expect("pool stats", c.call("runvm_status"), '"engines"')
     expect("re-hook refused", c.call("android_hook", session="android-1", symbol="fib", returns=7), "already stubbed")
     expect("close", c.call("android_close", session="android-1"), '"closed"')
 

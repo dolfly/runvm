@@ -20,17 +20,17 @@
 
 purego 在无 cgo 时只支持 glibc,golem 与 webframe 都靠它 `dlopen` 系统库。Alpine 需要 `CGO_ENABLED=1` + `zig cc` 交叉编译,一条独立工具链。发布矩阵因此只覆盖 glibc linux / darwin / windows。
 
-## 3. Android:JNI 上行调用
+## 3. Android:JNI 上行调用(已完成)
 
-`android_open` 已经能传 `dex`,让 `FindClass` / `GetMethodID` 按真实签名解析;但 guest 反向调 Java(比如 `CallStaticObjectMethod` 拿一个 `Context`)还需要宿主提供实现。golem 的 JNI handler 是 Go 接口,runvm 目前没有把它暴露成工具。
+~~需要宿主实现 JNI handler~~ → `android_java_stub` / `android_java_stubs` 已上线:按 `class->method` 查表应答 `Call*Method*`,数值桩按调用点强制转换成 int/long/boolean,字符串桩应答对象调用,`null` 表示"对象不存在"。
 
-**做法**:加 `android_java_stub` 工具(`{class, method, returns}`),在 `Config` 的 JNI handler 里查表并返回默认值。这样"库依赖 Android 框架"的场景才真正可测。
+一个已知约束:golem 把新的类型化平台配置放在 `internal/platform/android`,外部模块只能用**已弃用**的 `emulator.Config.Android.JNI`。代码里注明了原因,等 golem 导出公开构造函数后再迁移。
 
-## 4. 池化后的故障语义
+## 4. 池化后的可观测性(部分完成)
 
-`emulator.Pool` 会在 `MaxUses` 之后回收引擎、在 panic 后重建。runvm 目前只是透传——一个引擎崩了,下一个请求拿到新引擎继续。
+`runvm_status` 现在报每个会话的 `pool` 与 `engines.in_use` / `engines.idle`。
 
-**缺的是可观测性**:`runvm_status` 应该报每个会话的 `InUse` / `Idle` / 重建次数,否则长跑压测时"为什么变慢了"只能猜。
+**还缺**:重建次数与 `MaxUses` 回收计数——`PoolStats` 只有 Size/InUse/Idle,要拿到重建次数得在 `newFn` 里自己计数。长跑压测时这是"为什么变慢了"的第一手证据。
 
 ## 5. MCP 侧
 
@@ -38,9 +38,8 @@ purego 在无 cgo 时只支持 glibc,golem 与 webframe 都靠它 `dlopen` 系�
 - `resources` / `prompts` 返回空数组,占位而已。
 - 没有 progress notification:`h5_open` 冷启动 1.5 秒、`android_open` 池化 4 引擎会更久,这些过程对模型是不可见的。
 
-## 6. 测试
+## 6. 测试(已完成一半)
 
-现在有 4 个包的单元测试,以及 `scripts/e2e.py`(真开 emulator 和 WebView,断言 9 项)。缺的是:
+单元测试覆盖 5 个包(mcp / session / android:args + JNI 桩);`scripts/e2e.py` 会真开 emulator 和 WebView,断言 17 项。
 
-- **CI 里跑真后端**:ubuntu runner 上装 WebKitGTK/Xvfb/libunicorn 后跑一次 `h5_open` + `android_open`,能挡住"本地能跑、干净环境跑不了"这类问题。
-- **回归夹具**:一个 10 KB 的 AArch64 `.so`(golem 的 `examples/native/native.so`)不适合直接 vendored 进仓库,可以在 CI 里 clone golem 取用。
+CI 里新增 `e2e` job:装 WebKitGTK + Xvfb + libunicorn(发行版没有就从 Python wheel 取),clone golem 拿 sysroot 和 `native.so`,然后跑同一份脚本。夹具因此不用 vendored 进仓库。

@@ -24,6 +24,7 @@
   "os": "linux",
   "arch": "amd64",
   "android": {"sessions": 0, "assets": "/…/golem/assets", "assets_ok": true},
+  "sessions": {"android": [{"session": "android-1", "pool": 2, "engines": {"in_use": 0, "idle": 2}}]},
   "h5": {"sessions": 0},
   "sessions": {"android": [], "h5": []}
 }
@@ -59,6 +60,34 @@
 ```
 
 直接读 ELF,所以列导出表本身不需要 emulator 活着。
+
+## android_java_stub
+
+库通过 JNI 向 Java 侧要东西时(取系统时间、包名、设备 ID),真的 Android 运行时不在这里。这个工具让宿主替它回答。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session` | string | ✓ | |
+| `class` | string | ✓ | `java/lang/System`、`java.lang.System`、`Ljava/lang/System;` 都接受 |
+| `method` | string | ✓ | 方法名;给完整签名也行,括号前的部分生效 |
+| `returns` | string \| number \| boolean \| null | | 返回值,按调用点的类型强制转换 |
+
+```json
+{"stub": "java/lang/System->currentTimeMillis", "returns": "1700000000000"}
+{"stub": "android.content.Context->getPackageName", "returns": "\"com.example.app\""}
+```
+
+一个数值桩同时应答 `int` / `long` / `boolean` 调用;字符串桩应答返回对象的调用;`null` 表示"这个 Java 对象不存在"。没注册的回调落到默认值(`null` / `0`)——和设备上缺类时的行为一致。同一个 class+method 重复注册会被拒绝。
+
+## android_java_stubs
+
+| 参数 | 类型 | 必填 |
+|---|---|---|
+| `session` | string | ✓ |
+
+```json
+{"stubs": [{"class": "android.content.Context", "method": "getPackageName", "kind": "string", "string": "com.example.app"}]}
+```
 
 ## android_call
 

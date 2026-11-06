@@ -83,6 +83,28 @@ func New(version string) (*mcp.Server, *Set) {
 	})
 
 	srv.Add(mcp.Tool{
+		Name: "android_java_stub",
+		Description: "Answer a Java callback the library makes through JNI, instead of needing a real Android " +
+			"runtime. Give the Java class and method and the value to return: a string answers object calls, " +
+			"a number answers int/long/boolean calls, null answers 'no such object'.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from android_open"),
+			"class":   str(`Java class, e.g. "java/lang/System" or "android.content.Context"`),
+			"method":  str(`Method name, e.g. "currentTimeMillis" (a full signature works too)`),
+			"returns": map[string]any{"description": "Value the method returns: string, number, boolean or null",
+				"type": []string{"string", "number", "boolean", "null"}},
+		}, "session", "class", "method"),
+		Handler: s.androidJavaStub,
+	})
+
+	srv.Add(mcp.Tool{
+		Name:        "android_java_stubs",
+		Description: "List the Java callbacks this session answers.",
+		InputSchema: object(map[string]any{"session": str("Session id from android_open")}, "session"),
+		Handler:     s.androidJavaStubs,
+	})
+
+	srv.Add(mcp.Tool{
 		Name: "android_call",
 		Description: "Call an exported function and return its value. Arguments are integers, strings (char*), " +
 			`or {"buffer": n} for an out-parameter of n bytes that is read back after the call. Up to 8 arguments.`,
@@ -196,7 +218,12 @@ func (s *Set) androidDetails() []map[string]any {
 		if !ok {
 			continue
 		}
-		entry := map[string]any{"session": id, "pool": sess.PoolSize()}
+		st := sess.Stats()
+		entry := map[string]any{
+			"session": id,
+			"pool":    sess.PoolSize(),
+			"engines": map[string]any{"in_use": st.InUse, "idle": st.Idle},
+		}
 		if hooks := sess.Hooks(); len(hooks) > 0 {
 			entry["hooks"] = hooks
 		}
@@ -327,6 +354,41 @@ func (s *Set) androidHook(_ context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"hooked": a.Symbol, "returns": uint64(a.Returns), "hooks": sess.Hooks()}, nil
+}
+
+func (s *Set) androidJavaStub(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+		Class   string `json:"class"`
+		Method  string `json:"method"`
+		Returns any    `json:"returns"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.androidSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	st, err := sess.JavaStub(a.Class, a.Method, a.Returns)
+	if err != nil {
+		return nil, fmt.Errorf("android_java_stub: %w", err)
+	}
+	return map[string]any{"stub": st.Class + "->" + st.Method, "returns": st.String()}, nil
+}
+
+func (s *Set) androidJavaStubs(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.androidSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"stubs": sess.JavaStubs()}, nil
 }
 
 func (s *Set) androidClose(_ context.Context, raw json.RawMessage) (any, error) {
