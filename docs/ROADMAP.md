@@ -38,7 +38,10 @@ purego 在无 cgo 时只支持 glibc,golem 与 webframe 都靠它 `dlopen` 系�
 
 ## 5. MCP 侧
 
+已完成:`notifications/cancelled`、HTTP 传输、会话上限与空闲回收、`h5_wait_for`。
+
 - ~~`notifications/cancelled` 被忽略~~ → 已实现:每个请求的 ctx 注册在服务端,取消通知会真的中断 `android_call`(`pool.Do` 尊重 ctx)和 `h5_eval`。
+- ~~会话会泄漏~~ → `RUNVM_MAX_SESSIONS` + `RUNVM_IDLE_TIMEOUT` + 后台回收(按会话 `last_used`)。
 - `resources` / `prompts` 返回空数组,占位而已。
 - 没有 progress notification:`h5_open` 冷启动 1.5 秒、`android_open` 池化 4 引擎会更久,这些过程对模型是不可见的。
 - HTTP 传输没有实现 SSE 的 resumability(事件 id + `Last-Event-ID` 重放):本服务不推消息,这一块暂时不需要。

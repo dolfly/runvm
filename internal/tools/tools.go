@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/dolfly/runvm/internal/android"
@@ -19,17 +20,27 @@ import (
 	"github.com/dolfly/runvm/internal/session"
 )
 
+// Limits keeps one forgotten session from becoming a leaked emulator.
+type Limits struct {
+	// MaxSessions caps android+h5 sessions together; 0 means unlimited.
+	MaxSessions int
+	// IdleTimeout closes sessions unused for this long; 0 disables reaping.
+	IdleTimeout time.Duration
+}
+
 // Set holds the live sessions behind the tools.
 type Set struct {
 	Version string
+	Limits  Limits
 	Android *session.Store[*android.Session]
 	H5      *session.Store[*h5.Session]
 }
 
 // New builds the MCP server and the session set it operates on.
-func New(version string) (*mcp.Server, *Set) {
+func New(version string, limits Limits) (*mcp.Server, *Set) {
 	s := &Set{
 		Version: version,
+		Limits:  limits,
 		Android: session.New[*android.Session]("android"),
 		H5:      session.New[*h5.Session]("h5"),
 	}
@@ -164,6 +175,20 @@ func New(version string) (*mcp.Server, *Set) {
 	})
 
 	srv.Add(mcp.Tool{
+		Name: "h5_wait_for",
+		Description: "Poll the page until a JavaScript expression is truthy (or a selector matches), then " +
+			"return the value. This is the tool for asynchronous UI: wait for the result to appear instead " +
+			"of sleeping and hoping.",
+		InputSchema: object(map[string]any{
+			"session":    str("Session id from h5_open"),
+			"expression": str("JavaScript expression polled until truthy, e.g. document.querySelector('#done')"),
+			"selector":   str("CSS selector; shorthand for expression=document.querySelector(<selector>)"),
+			"timeout_ms": num("How long to wait (default 10000)"),
+		}, "session"),
+		Handler: s.h5WaitFor,
+	})
+
+	srv.Add(mcp.Tool{
 		Name: "h5_screenshot",
 		Description: "Capture the page as a PNG and return it as an image. The session must have been opened " +
 			"with visible=true on Linux, where the host draws in a private Xvfb it started itself.",
@@ -182,6 +207,76 @@ func New(version string) (*mcp.Server, *Set) {
 	})
 
 	return srv, s
+}
+
+// reserved reports whether another session would exceed the configured cap.
+func (s *Set) reserved() error {
+	if s.Limits.MaxSessions <= 0 {
+		return nil
+	}
+	if n := s.Android.Len() + s.H5.Len(); n >= s.Limits.MaxSessions {
+		return fmt.Errorf("session limit reached (%d); close one with android_close/h5_close, "+
+			"or raise RUNVM_MAX_SESSIONS", s.Limits.MaxSessions)
+	}
+	return nil
+}
+
+// StartReaper closes sessions left idle for longer than the configured
+// timeout. A model that forgets to close a page or an emulator should cost a
+// timer, not a leak, in a server that stays up for days.
+func (s *Set) StartReaper(ctx context.Context) {
+	if s.Limits.IdleTimeout <= 0 {
+		return
+	}
+	interval := s.Limits.IdleTimeout / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				s.reap(now)
+			}
+		}
+	}()
+}
+
+// reap closes sessions idle past the cutoff and reports how many it closed.
+func (s *Set) reap(now time.Time) int {
+	if s.Limits.IdleTimeout <= 0 {
+		return 0
+	}
+	cutoff := now.Add(-s.Limits.IdleTimeout)
+	closed := 0
+	for _, id := range s.Android.IDs() {
+		sess, ok := s.Android.Get(id)
+		if !ok || !sess.LastUsed().Before(cutoff) {
+			continue
+		}
+		if _, gone := s.Android.Delete(id); gone {
+			_ = sess.Close()
+			closed++
+		}
+	}
+	for _, id := range s.H5.IDs() {
+		sess, ok := s.H5.Get(id)
+		if !ok || !sess.LastUsed().Before(cutoff) {
+			continue
+		}
+		if _, gone := s.H5.Delete(id); gone {
+			_ = sess.Close()
+			closed++
+		}
+	}
+	return closed
 }
 
 // CloseAll releases every live session; call it on shutdown.
@@ -209,6 +304,10 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 		"h5": map[string]any{
 			"sessions": s.H5.Len(),
 		},
+		"limits": map[string]any{
+			"max_sessions": s.Limits.MaxSessions,
+			"idle_timeout": s.Limits.IdleTimeout.String(),
+		},
 		"sessions": map[string]any{
 			"android": s.androidDetails(),
 			"h5":      s.H5.IDs(),
@@ -234,8 +333,9 @@ func (s *Set) androidDetails() []map[string]any {
 		}
 		st := sess.Stats()
 		entry := map[string]any{
-			"session": id,
-			"pool":    sess.PoolSize(),
+			"session":   id,
+			"pool":      sess.PoolSize(),
+			"last_used": sess.LastUsed().UTC().Format(time.RFC3339),
 			"engines": map[string]any{
 				"in_use":  st.InUse,
 				"idle":    st.Idle,
@@ -257,6 +357,9 @@ func (s *Set) androidOpen(_ context.Context, raw json.RawMessage) (any, error) {
 	}
 	if a.Engine == "" {
 		a.Engine = os.Getenv("RUNVM_ENGINE")
+	}
+	if err := s.reserved(); err != nil {
+		return nil, fmt.Errorf("android_open: %w", err)
 	}
 	info, infoErr := android.Describe(a.SO)
 	exports, exportsErr := android.Exports(a.SO)
@@ -446,6 +549,9 @@ func (s *Set) h5Open(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
+	if err := s.reserved(); err != nil {
+		return nil, fmt.Errorf("h5_open: %w", err)
+	}
 	ephemeral := true
 	if a.Ephemeral != nil {
 		ephemeral = *a.Ephemeral
@@ -502,6 +608,101 @@ func (s *Set) h5Console(_ context.Context, raw json.RawMessage) (any, error) {
 	}
 	lines := sess.Console(clear)
 	return map[string]any{"count": len(lines), "lines": lines}, nil
+}
+
+// pollEnvelope evaluates the predicate inside try/catch and returns a stable
+// JSON string, so a throw mid-poll is reported instead of surfacing as a
+// transport error.
+const pollEnvelope = `(function () {
+  try {
+    var v = (%s);
+    return JSON.stringify({ok: !!v, v: v === undefined ? null : v});
+  } catch (e) {
+    return JSON.stringify({ok: false, error: String(e)});
+  }
+})()`
+
+// unwrapJSONString undoes webframe's formatting: a string result comes back
+// JSON-quoted (e.g. "\"{\\\"ok\\\":true}\"").
+func unwrapJSONString(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		if unq, err := strconv.Unquote(s); err == nil {
+			return unq
+		}
+	}
+	return s
+}
+
+func (s *Set) h5WaitFor(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session    string `json:"session"`
+		Expression string `json:"expression"`
+		Selector   string `json:"selector"`
+		TimeoutMS  int    `json:"timeout_ms"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.h5Session(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	expr := a.Expression
+	if expr == "" && a.Selector != "" {
+		sel, _ := json.Marshal(a.Selector)
+		expr = "document.querySelector(" + string(sel) + ")"
+	}
+	if expr == "" {
+		return nil, fmt.Errorf("h5_wait_for: give an expression or a selector")
+	}
+
+	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	script := fmt.Sprintf(pollEnvelope, expr)
+
+	last := "undefined"
+	start := time.Now()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		raw, evalErr := sess.Eval(ctx, script, 10*time.Second)
+		if evalErr != nil {
+			return nil, fmt.Errorf("h5_wait_for: %w", evalErr)
+		}
+		var envelope struct {
+			OK    bool            `json:"ok"`
+			V     json.RawMessage `json:"v"`
+			Error string          `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(unwrapJSONString(raw)), &envelope); err != nil {
+			return nil, fmt.Errorf("h5_wait_for: unreadable poll result %q", raw)
+		}
+		if envelope.OK {
+			return map[string]any{
+				"matched":   true,
+				"value":     json.RawMessage(envelope.V),
+				"waited_ms": time.Since(start).Milliseconds(),
+			}, nil
+		}
+		if envelope.Error != "" {
+			last = envelope.Error
+		} else if len(envelope.V) > 0 {
+			last = string(envelope.V)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("h5_wait_for: timed out after %s waiting for %s (last value: %s)",
+				timeout, expr, last)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (s *Set) h5Screenshot(_ context.Context, raw json.RawMessage) (any, error) {

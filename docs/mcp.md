@@ -24,6 +24,7 @@
   "os": "linux",
   "arch": "amd64",
   "android": {"sessions": 0, "assets": "/…/golem/assets", "assets_ok": true},
+  "limits": {"max_sessions": 8, "idle_timeout": "0s"},
   "sessions": {"android": [{"session": "android-1", "pool": 2, "engines": {"in_use": 0, "idle": 2}}]},
   "h5": {"sessions": 0},
   "sessions": {"android": [], "h5": []}
@@ -167,6 +168,23 @@
 ```
 
 `level` 为 `log`/`warn`/`error`/`assert`/`dialog`(弹窗被拦截时)以及 `load`(页面加载完成)、`error`(页面异常)。
+
+## h5_wait_for
+
+轮询直到条件成立——异步 UI 的正解,不用 sleep 猜时间。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session` | string | ✓ | |
+| `expression` | string | | 反复求值直到为真 |
+| `selector` | string | | `expression=document.querySelector(<selector>)` 的简写 |
+| `timeout_ms` | integer | | 默认 10000 |
+
+```json
+{"matched": true, "value": {}, "waited_ms": 386}
+```
+
+表达式在页面里被 `try/catch` 包住并序列化成 JSON,所以中途抛异常会作为"还没成立"继续等,而不是炸掉调用。超时报错会带上最后一次取到的值。
 
 ## h5_screenshot
 

@@ -17,7 +17,7 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>13 个工具"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>14 个工具"]
   S --> REG["session.Store<br/>android-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
   REG --> H["h5 后端<br/>进程外"]
@@ -102,6 +102,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `android_close` | 释放 emulator |
 | `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
 | `h5_eval` | 在页面里执行 JS,返回结果(自动 await Promise) |
+| `h5_wait_for` | 轮询直到表达式为真或选择器命中,返回当时的取值 |
 | `h5_console` | 取回缓冲的 console 与页面异常 |
 | `h5_screenshot` | 把页面截成 PNG 返回(Linux,需 `visible: true`) |
 | `h5_close` | 关闭页面宿主进程 |
@@ -115,6 +116,24 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 ```
 
 `android_open` 还可以开一个**引擎池**(`"pool": 4`):多个 AArch64 引擎共享 `.so` 的只读页,同一会话的调用就能真并行。默认 1,即一次一个调用。
+
+## 会话治理
+
+长时间跑的服务最怕"模型忘了关"。两个开关:
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `RUNVM_MAX_SESSIONS` | 8 | android + h5 会话总数上限,超了直接报错并提示关哪个 |
+| `RUNVM_IDLE_TIMEOUT` | 关闭 | 超过这么久没被使用的会话自动关闭,如 `30m` |
+
+`runvm_status` 会报当前限制与每个 android 会话的 `last_used`。回收是按会话粒度的:一个被遗弃的页面或模拟器应该只花掉一个定时器,而不是一直占着内存。
+
+异步 UI 用 `h5_wait_for` 而不是 `sleep`:
+
+```json
+{"session":"h5-1","selector":"[data-ready]","timeout_ms":5000}
+→ {"matched":true,"value":{},"waited_ms":386}
+```
 
 ## 远程访问(HTTP)
 
@@ -175,7 +194,7 @@ make fmt
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   13 个工具的参数校验与调用编排
+internal/tools/   14 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/h5/      webframe 宿主(子进程)与驱动

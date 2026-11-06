@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -77,7 +78,8 @@ func serve() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server, set := tools.New(version)
+	server, set := tools.New(version, limitsFromEnv())
+	set.StartReaper(ctx)
 	// Sessions hold emulators and child processes; a clean shutdown must not
 	// leave either behind.
 	defer set.CloseAll()
@@ -113,7 +115,8 @@ func serveHTTP(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server, set := tools.New(version)
+	server, set := tools.New(version, limitsFromEnv())
+	set.StartReaper(ctx)
 	defer set.CloseAll()
 
 	srv := &http.Server{
@@ -139,6 +142,36 @@ func serveHTTP(args []string) {
 	}
 }
 
+// limitsFromEnv reads the session guardrails. Both default to off/8 so a
+// forgotten session costs nothing surprising in a short run.
+func limitsFromEnv() tools.Limits {
+	return tools.Limits{
+		MaxSessions: envInt("RUNVM_MAX_SESSIONS", 8),
+		IdleTimeout: envDuration("RUNVM_IDLE_TIMEOUT", 0),
+	}
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		if n, err := strconv.Atoi(v); err == nil {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return def
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -157,7 +190,9 @@ usage:
   runvm web-host <url>  internal: host one page (spawned by h5_open)
 
 environment:
-  RUNVM_HTTP_ADDR  default listen address for runvm http (127.0.0.1:8765)
+  RUNVM_HTTP_ADDR   default listen address for runvm http (127.0.0.1:8765)
+  RUNVM_MAX_SESSIONS cap on live sessions together (default 8, 0 = unlimited)
+  RUNVM_IDLE_TIMEOUT close sessions unused this long, e.g. 30m (default off)
   RUNVM_TOKEN      bearer token required by runvm http
   RUNVM_ASSETS     path to golem's bionic sysroot (assets/android/sdk23)
   RUNVM_ENGINE   default CPU backend, e.g. unicorn

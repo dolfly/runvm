@@ -100,23 +100,56 @@ def main():
                                             **{"class": "java/lang/System", "method": "currentTimeMillis",
                                                "returns": 1}), "already registered")
     expect("pool stats", c.call("runvm_status"), '"engines"')
+    expect("limits reported", c.call("runvm_status"), '"max_sessions"')
     expect("re-hook refused", c.call("android_hook", session="android-1", symbol="fib", returns=7), "already stubbed")
     expect("close", c.call("android_close", session="android-1"), '"closed"')
 
-    print("== h5: two pages, pipelined opens ==")
-    start = time.time()
-    c.send("tools/call", {"name": "h5_open", "arguments": {"target": "examples/h5/page.html"}})
-    c.send("tools/call", {"name": "h5_open", "arguments": {"target": "examples/h5/page.html"}})
-    a, b = c.recv(), c.recv()
-    elapsed = time.time() - start
-    ok = elapsed < 2.8
-    print(f"{'ok  ' if ok else 'FAIL'} two opens in {elapsed:.2f}s (one page load is ~1.5s)")
+    print("== h5: pipelined opens and non-blocking dispatch ==")
+    t0 = time.time()
+    first = c.call("h5_open", target="examples/h5/page.html")
+    single = time.time() - t0
+    sid1 = json.loads(text(first))["session"]
+
+    # Four opens in flight at once: all must succeed, and none may be dropped.
+    for _ in range(3):
+        c.send("tools/call", {"name": "h5_open", "arguments": {"target": "examples/h5/page.html"}})
+    replies = [c.recv() for _ in range(3)]
+    total = time.time() - t0
+    sids = [sid1] + [json.loads(text(r))["session"] for r in replies]
+    ok = len(set(sids)) == 4
+    print(f"{'ok  ' if ok else 'FAIL'} four pages open ({total:.2f}s, one load {single:.2f}s): {sids}")
     if not ok:
-        FAILED.append(f"two h5_open calls took {elapsed:.2f}s: they serialized instead of overlapping")
-    expect("page 1 title", c.call("h5_eval", session="h5-1", js="document.title"), "runvm demo")
-    expect("page 2 title", c.call("h5_eval", session="h5-2", js="document.title"), "runvm demo")
-    expect("close 1", c.call("h5_close", session="h5-1"), '"closed"')
-    expect("close 2", c.call("h5_close", session="h5-2"), '"closed"')
+        FAILED.append(f"pipelined opens returned duplicate sessions: {sids}")
+
+    # A slow call must not block an unrelated one. h5_wait_for with a 2.5s
+    # timeout is the slow call; runvm_status has to answer while it runs.
+    slow = c.send("tools/call", {"name": "h5_wait_for",
+                                 "arguments": {"session": sids[0], "expression": "false", "timeout_ms": 2500}})
+    t1 = time.time()
+    fast = c.send("tools/call", {"name": "runvm_status", "arguments": {}})
+    first_reply = c.recv()
+    reply_latency = time.time() - t1
+    ok = first_reply.get("id") == fast and reply_latency < 1.5
+    print(f"{'ok  ' if ok else 'FAIL'} status answered in {reply_latency:.2f}s "
+          f"while a 2.5s call was in flight")
+    if not ok:
+        FAILED.append(f"dispatch blocked: got reply id {first_reply.get('id')} after {reply_latency:.2f}s")
+    slow_reply = c.recv()
+    if slow_reply.get("id") != slow:
+        FAILED.append(f"slow call replied with id {slow_reply.get('id')}, want {slow}")
+
+    for sid in sids:
+        expect(f"title {sid}", c.call("h5_eval", session=sid, js="document.title"), "runvm demo")
+    for sid in sids:
+        expect(f"close {sid}", c.call("h5_close", session=sid), '"closed"')
+
+    print("== h5: wait_for ==")
+    opened = c.call("h5_open", target="examples/h5/page.html")
+    sid = json.loads(text(opened))["session"]
+    c.call("h5_eval", session=sid, js="setTimeout(function () { document.body.dataset.ready = '1' }, 300)")
+    expect("wait_for selector", c.call("h5_wait_for", session=sid, selector="[data-ready]", timeout_ms=5000), '"matched": true')
+    expect("wait_for timeout", c.call("h5_wait_for", session=sid, expression="false", timeout_ms=300), "timed out")
+    expect("close", c.call("h5_close", session=sid), '"closed"')
 
     print("== h5: screenshot ==")
     shot_path = "e2e-screenshot.png"

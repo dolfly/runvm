@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,9 +28,10 @@ type Session struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 
-	visible bool
-	display string
-	own     bool
+	visible  bool
+	display  string
+	own      bool
+	lastUsed atomic.Int64
 
 	mu      sync.Mutex
 	wmu     sync.Mutex // serializes writes to stdin: one line per JSON message
@@ -124,6 +126,9 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 		ready:   make(chan struct{}),
 		done:    make(chan struct{}),
 	}
+	// Create-time touch matters: an untouched session reads as "idle since
+	// 1970" and the reaper would close it before its first call.
+	s.touch()
 	go s.readLoop(stdout)
 
 	select {
@@ -205,6 +210,7 @@ func (s *Session) Eval(ctx context.Context, js string, timeout time.Duration) (s
 		timeout = 30 * time.Second
 	}
 
+	s.touch()
 	// A page is single-threaded; two interleaved evaluations would make the
 	// order of side effects unpredictable, so callers queue here.
 	s.evalMu.Lock()
@@ -255,6 +261,12 @@ func (s *Session) dropPending(id int) {
 }
 
 // Console returns buffered console lines, optionally clearing them.
+// touch records use, so an idle session can be reaped.
+func (s *Session) touch() { s.lastUsed.Store(time.Now().UnixNano()) }
+
+// LastUsed reports the last time this page did work.
+func (s *Session) LastUsed() time.Time { return time.Unix(0, s.lastUsed.Load()) }
+
 func (s *Session) Console(clear bool) []Line {
 	s.mu.Lock()
 	defer s.mu.Unlock()

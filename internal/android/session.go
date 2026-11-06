@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/isesword/golem/emulator"
 )
@@ -42,6 +43,7 @@ type Session struct {
 
 	closeOnce sync.Once
 	created   atomic.Int64
+	lastUsed  atomic.Int64 // unix nanos; the reaper reads this
 
 	// hooks are applied lazily: an engine learns about them the first time it
 	// is used after they were registered, so registering a hook never costs a
@@ -131,6 +133,7 @@ func Open(path string, opts OpenOptions) (*Session, error) {
 		return nil, fmt.Errorf("android_open: %s: %w (run `runvm doctor` if this mentions the engine or libunicorn)", path, err)
 	}
 	s.pool = pool
+	s.touch()
 	return s, nil
 }
 
@@ -242,6 +245,7 @@ func (s *Session) Call(ctx context.Context, symbol string, args []Arg) (Result, 
 		return res, fmt.Errorf("android_call: %d arguments, at most 8 are supported", len(args))
 	}
 
+	s.touch()
 	err := s.pool.Do(ctx, func(emu *emulator.Emulator) error {
 		if err := s.applyHooks(emu); err != nil {
 			return err
@@ -307,6 +311,7 @@ func (s *Session) Hook(symbol string, returns uint64) error {
 	if old, ok := s.hooks[symbol]; ok && old != returns {
 		return fmt.Errorf("android_hook: %q is already stubbed to %d; open a new session to change it", symbol, old)
 	}
+	s.touch()
 	s.hooks[symbol] = returns
 	s.version++
 	return nil
@@ -354,6 +359,12 @@ func (s *Session) Hooks() map[string]uint64 {
 	return out
 }
 
+// touch records use, so an idle session can be reaped.
+func (s *Session) touch() { s.lastUsed.Store(time.Now().UnixNano()) }
+
+// LastUsed reports the last time this session did work.
+func (s *Session) LastUsed() time.Time { return time.Unix(0, s.lastUsed.Load()) }
+
 // EnginesCreated counts every engine ever constructed, including pool warmup
 // and post-panic rebuilds. Growth past the configured size is the signal that
 // something is recycling or crashing.
@@ -375,6 +386,7 @@ func (s *Session) JavaStub(class, method string, v any) (jniStub, error) {
 	if err != nil {
 		return st, err
 	}
+	s.touch()
 	if err := s.jni.put(st); err != nil {
 		return st, err
 	}
