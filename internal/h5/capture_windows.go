@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/png"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,7 +21,19 @@ import (
 // content. The window is ours (the host created it), so no desktop capture and
 // no permissions are involved.
 func capturePNG(string) ([]byte, error) {
-	hwnd, err := ownWindow()
+	// The window may still be mapping right after the page reports ready;
+	// give it a moment instead of failing on a race we can absorb.
+	var (
+		hwnd uintptr
+		err  error
+	)
+	for i := 0; i < 10; i++ {
+		hwnd, err = ownWindow()
+		if err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -68,19 +81,22 @@ var (
 
 type rect struct{ Left, Top, Right, Bottom int32 }
 
-// ownWindow returns the largest visible top-level window owned by this process,
-// which is the one webframe created for the page.
+// ownWindow returns the largest top-level window owned by this process, which
+// is the one webframe created for the page. Visible windows win over hidden
+// ones: a hidden window can still be captured, but only after it has rendered,
+// and on a session without a desktop nothing is visible at all.
 func ownWindow() (uintptr, error) {
 	pid := uint32(windows.GetCurrentProcessId())
-	var best uintptr
-	var bestArea int64
+	type cand struct {
+		hwnd    uintptr
+		visible bool
+		area    int64
+	}
+	var cands []cand
 	cb := syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
 		var winPID uint32
 		procGetWindowPID.Call(hwnd, uintptr(unsafe.Pointer(&winPID)))
 		if winPID != pid {
-			return 1
-		}
-		if ok, _, _ := procIsWindowVisible.Call(hwnd); ok == 0 {
 			return 1
 		}
 		var r rect
@@ -88,16 +104,29 @@ func ownWindow() (uintptr, error) {
 			return 1
 		}
 		area := int64(r.Right-r.Left) * int64(r.Bottom-r.Top)
-		if area > bestArea {
-			best, bestArea = hwnd, area
+		if area <= 0 {
+			return 1
 		}
+		vis, _, _ := procIsWindowVisible.Call(hwnd)
+		cands = append(cands, cand{hwnd: hwnd, visible: vis != 0, area: area})
 		return 1
 	})
 	procEnumWindows.Call(cb, 0)
-	if best == 0 {
-		return 0, errors.New("screenshot: no visible window in this process (open the page with visible: true)")
+
+	var best cand
+	for _, c := range cands {
+		switch {
+		case best.hwnd == 0,
+			c.visible && !best.visible,
+			c.visible == best.visible && c.area > best.area:
+			best = c
+		}
 	}
-	return best, nil
+	if best.hwnd == 0 {
+		return 0, fmt.Errorf("screenshot: no window in this process (found %d candidates; "+
+			"open the page with visible: true)", len(cands))
+	}
+	return best.hwnd, nil
 }
 
 func printWindow(hwnd uintptr) (image.Image, error) {

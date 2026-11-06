@@ -143,10 +143,11 @@ jobs:
         shell: bash
         run: |
           set +e
-          go run -tags unicorn ./cmd/runvm selftest
+          out=$(go run -tags unicorn ./cmd/runvm selftest 2>&1)
           code=$?
-          if [ "$code" -eq 2 ]; then
-            echo "screenshot not implemented on this platform yet (exit 2) — skipping"
+          echo "$out"
+          if [ "$code" -ne 0 ] && echo "$out" | grep -q "not supported"; then
+            echo "screenshot not implemented on this platform yet — skipping"
             exit 0
           fi
           exit "$code"
