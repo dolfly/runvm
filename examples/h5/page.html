@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>runvm demo</title>
+<div id="app"></div>
+<script>
+  const app = document.getElementById("app");
+  app.innerHTML = "<button id=save>Save</button>";
+  document.getElementById("save").onclick = () => { app.dataset.saved = "yes"; console.log("clicked"); };
+  console.log("page ready", document.title);
+</script>

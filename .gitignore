@@ -1,0 +1,6 @@
+/bin/
+/dist/
+/.e2e/
+/.gopath/
+/.gocache/
+*.test
