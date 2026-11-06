@@ -27,7 +27,7 @@ func captureSupported(own bool, display string) error {
 	return nil
 }
 
-func capturePNG(display string) ([]byte, error) {
+func capturePNG(display string, _ uint32) ([]byte, error) {
 	xwd, err := exec.LookPath("xwd")
 	if err != nil {
 		return nil, fmt.Errorf("screenshot: xwd not found (apt install x11-apps)")

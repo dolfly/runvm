@@ -19,7 +19,7 @@ import (
 // (0x2) matters: without it PrintWindow returns an empty frame for composited
 // content. The window is ours (the host created it), so no desktop capture and
 // no permissions are involved.
-func capturePNG(string) ([]byte, error) {
+func capturePNG(_ string, pid uint32) ([]byte, error) {
 	// The window may still be mapping right after the page reports ready;
 	// give it a moment instead of failing on a race we can absorb.
 	var (
@@ -27,7 +27,7 @@ func capturePNG(string) ([]byte, error) {
 		err  error
 	)
 	for i := 0; i < 10; i++ {
-		hwnd, err = ownWindow()
+		hwnd, err = ownWindow(pid)
 		if err == nil {
 			break
 		}
@@ -82,12 +82,14 @@ var (
 
 type rect struct{ Left, Top, Right, Bottom int32 }
 
-// ownWindow returns the largest top-level window owned by this process, which
-// is the one webframe created for the page. Visible windows win over hidden
-// ones: a hidden window can still be captured, but only after it has rendered,
-// and on a session without a desktop nothing is visible at all.
-func ownWindow() (uintptr, error) {
-	pid := uint32(windows.GetCurrentProcessId())
+// ownWindow returns the largest top-level window owned by pid.
+//
+// pid is the page host's, not ours: the window is created by glaze inside the
+// `runvm web-host` child process, so enumerating our own process finds nothing
+// at all. Visible windows win over hidden ones: a hidden window can still be
+// captured, but only after it has rendered, and on a session without a desktop
+// nothing is visible at all.
+func ownWindow(pid uint32) (uintptr, error) {
 	type cand struct {
 		hwnd    uintptr
 		visible bool

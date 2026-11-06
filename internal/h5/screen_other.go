@@ -6,7 +6,7 @@ import "errors"
 
 // capturePNG is Linux-only: the cross-platform WebView APIs expose no
 // snapshot call, so there is nothing honest to return here yet.
-func capturePNG(string) ([]byte, error) {
+func capturePNG(string, uint32) ([]byte, error) {
 	return nil, errors.New("screenshot: not supported on this platform yet; on macOS it needs a native WKWebView snapshot (see docs/ROADMAP.md)")
 }
 

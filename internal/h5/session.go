@@ -321,7 +321,13 @@ func (s *Session) Screenshot() ([]byte, error) {
 		"new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))",
 		2*time.Second)
 	time.Sleep(120 * time.Millisecond)
-	return capturePNG(display)
+	// The window belongs to the page host process, not to us: hand its pid to
+	// the platform capture instead of asking for "our" window.
+	var pid uint32
+	if s.cmd != nil && s.cmd.Process != nil {
+		pid = uint32(s.cmd.Process.Pid)
+	}
+	return capturePNG(display, pid)
 }
 
 // SetLastScreenshot remembers the most recent capture, so it can be read back
