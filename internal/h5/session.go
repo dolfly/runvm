@@ -46,7 +46,7 @@ type Session struct {
 	wmu     sync.Mutex // serializes writes to stdin: one line per JSON message
 	evalMu  sync.Mutex // one evaluation at a time: statement order is part of the API
 	seq     int
-	pending map[int]chan evalReply
+	pending map[int]*waiter
 	lines   []Line
 	closed  bool
 
@@ -57,15 +57,27 @@ type Session struct {
 	readyOnce sync.Once
 }
 
+// waiter is one outstanding host command: the channel its reply lands on, and
+// which command it was, so a capability error can carry the right sentinel.
+type waiter struct {
+	op string
+	ch chan evalReply
+}
+
 type evalReply struct {
 	result string
 	png    []byte
+	pdf    []byte
 	err    error
 }
 
 // errSnapshotUnsupported means the platform backend cannot rasterize the page,
 // so the caller should fall back to capturing the window.
 var errSnapshotUnsupported = errors.New("snapshot unsupported")
+
+// errPrintUnsupported means the platform backend cannot print the page, so the
+// caller should fall back to a raster capture.
+var errPrintUnsupported = errors.New("print unsupported")
 
 // OpenOptions configures one page host.
 type OpenOptions struct {
@@ -111,12 +123,16 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 	}
 	if opts.Visible {
 		cmd.Env = append(cmd.Env, "RUNVM_VISIBLE=1")
-		// Start from a default viewport when the caller did not pick one:
-		// a zero-sized window draws nothing worth capturing.
-		w, h := opts.Width, opts.Height
-		if w <= 0 || h <= 0 {
-			w, h = 1280, 800
-		}
+	}
+	// The viewport goes to the host even for a hidden page: a print takes its
+	// page size from the view, so asking for 1280x720 is how a caller gets a
+	// 16:9 document without opening a window. A visible page with no stated
+	// size falls back to something worth capturing.
+	w, h := opts.Width, opts.Height
+	if (w <= 0 || h <= 0) && opts.Visible {
+		w, h = 1280, 800
+	}
+	if w > 0 && h > 0 {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("RUNVM_VIEWPORT=%dx%d", w, h))
 	}
 	if len(env) > 0 {
@@ -148,7 +164,7 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 		target:  target,
 		cmd:     cmd,
 		stdin:   stdin,
-		pending: map[int]chan evalReply{},
+		pending: map[int]*waiter{},
 		ready:   make(chan struct{}),
 		done:    make(chan struct{}),
 	}
@@ -205,21 +221,25 @@ func (s *Session) readLoop(r io.Reader) {
 
 func (s *Session) deliver(msg hostMsg) {
 	s.mu.Lock()
-	ch, ok := s.pending[msg.ID]
+	w, ok := s.pending[msg.ID]
 	delete(s.pending, msg.ID)
 	s.mu.Unlock()
 	if !ok {
 		return
 	}
 	if msg.OK != nil && *msg.OK {
-		ch <- evalReply{result: msg.Result, png: msg.PNG}
+		w.ch <- evalReply{result: msg.Result, png: msg.PNG, pdf: msg.PDF}
 		return
 	}
 	if strings.Contains(msg.Error, "unsupported") {
-		ch <- evalReply{err: fmt.Errorf("%w: %s", errSnapshotUnsupported, msg.Error)}
+		sentinel := errSnapshotUnsupported
+		if w.op == "printpdf" {
+			sentinel = errPrintUnsupported
+		}
+		w.ch <- evalReply{err: fmt.Errorf("%w: %s", sentinel, msg.Error)}
 		return
 	}
-	ch <- evalReply{err: errors.New(msg.Error)}
+	w.ch <- evalReply{err: errors.New(msg.Error)}
 }
 
 func (s *Session) appendLine(l Line) {
@@ -255,7 +275,7 @@ func (s *Session) Eval(ctx context.Context, js string, timeout time.Duration) (s
 	s.seq++
 	id := s.seq
 	ch := make(chan evalReply, 1)
-	s.pending[id] = ch
+	s.pending[id] = &waiter{op: "eval", ch: ch}
 	s.mu.Unlock()
 
 	payload, err := json.Marshal(hostCmd{ID: id, Op: "eval", JS: js})
@@ -309,49 +329,72 @@ func (s *Session) Console(clear bool) []Line {
 	return out
 }
 
-// snapshot asks the page host to rasterize itself. macOS is the only backend
-// that implements it; everywhere else this returns errSnapshotUnsupported and
-// the caller captures the window instead.
-func (s *Session) snapshot() ([]byte, error) {
+// request sends one host command that carries no payload (snapshot, printpdf)
+// and waits for its reply. Failures are returned unwrapped: the caller knows
+// which tool it is answering for and adds that context itself.
+func (s *Session) request(op string, timeout time.Duration) (evalReply, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil, errors.New("h5_screenshot: session is closed")
+		return evalReply{}, errors.New("session is closed")
 	}
 	s.seq++
 	id := s.seq
 	ch := make(chan evalReply, 1)
-	s.pending[id] = ch
+	s.pending[id] = &waiter{op: op, ch: ch}
 	s.mu.Unlock()
 
-	payload, err := json.Marshal(hostCmd{ID: id, Op: "snapshot"})
+	payload, err := json.Marshal(hostCmd{ID: id, Op: op})
 	if err != nil {
-		return nil, fmt.Errorf("h5_screenshot: %w", err)
+		s.dropPending(id)
+		return evalReply{}, err
 	}
 	s.wmu.Lock()
 	_, werr := s.stdin.Write(append(payload, '\n'))
 	s.wmu.Unlock()
 	if werr != nil {
 		s.dropPending(id)
-		return nil, fmt.Errorf("h5_screenshot: write to host: %w", werr)
+		return evalReply{}, fmt.Errorf("write to host: %w", werr)
 	}
 
 	select {
 	case r := <-ch:
-		if r.err != nil {
-			return nil, r.err
-		}
-		if len(r.png) == 0 {
-			return nil, errors.New("h5_screenshot: host returned an empty image")
-		}
-		return r.png, nil
+		return r, r.err
 	case <-s.done:
+		s.dropPending(id) // page closed before the reply
+		return evalReply{}, errors.New("page closed before the reply arrived")
+	case <-time.After(timeout):
 		s.dropPending(id)
-		return nil, errors.New("h5_screenshot: page closed before the capture arrived")
-	case <-time.After(30 * time.Second):
-		s.dropPending(id)
-		return nil, errors.New("h5_screenshot: timed out waiting for the capture")
+		return evalReply{}, fmt.Errorf("timed out after %s", timeout)
 	}
+}
+
+// snapshot asks the page host to rasterize itself. macOS is the only backend
+// that implements it; everywhere else this returns errSnapshotUnsupported and
+// the caller captures the window instead.
+func (s *Session) snapshot() ([]byte, error) {
+	r, err := s.request("snapshot", 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("h5_screenshot: %w", err)
+	}
+	if len(r.png) == 0 {
+		return nil, errors.New("h5_screenshot: host returned an empty image")
+	}
+	return r.png, nil
+}
+
+// printPDF asks the page host to print itself. macOS is the only backend that
+// implements it; everywhere else this returns errPrintUnsupported and the
+// caller rasterizes instead.
+func (s *Session) printPDF() ([]byte, error) {
+	r, err := s.request("printpdf", 60*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("h5_pdf: %w", err)
+	}
+	if len(r.pdf) == 0 {
+		return nil, errors.New("h5_pdf: host returned an empty document")
+	}
+	return r.pdf, nil
 }
 
 // Screenshot captures the page as PNG.
@@ -412,25 +455,43 @@ func (s *Session) LastScreenshot() ([]byte, time.Time, bool) {
 	return s.shotPNG, s.shotAt, true
 }
 
-// PDF renders the page into a single-page PDF by capturing it and embedding the
-// image; see encodePDF for why it is raster rather than vector.
-func (s *Session) PDF() ([]byte, error) {
+// PDF renders the page into a single-page PDF and reports whether the result
+// is vector.
+//
+// Native print first: macOS can print the page, and that document keeps text as
+// text and covers the whole scrollable page. Everywhere else the honest option
+// is still a raster capture (see encodePDF), so the same call falls back to it
+// and says so. The bool is what stops the caller from calling a picture of a
+// page a printed page.
+func (s *Session) PDF() ([]byte, bool, error) {
+	if doc, err := s.printPDF(); err == nil {
+		s.setPDF(doc)
+		return doc, true, nil
+	} else if !errors.Is(err, errPrintUnsupported) {
+		return nil, false, err
+	}
+
 	capture, err := s.Screenshot()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	img, _, err := image.Decode(bytes.NewReader(capture))
 	if err != nil {
-		return nil, fmt.Errorf("h5_pdf: decode capture: %w", err)
+		return nil, false, fmt.Errorf("h5_pdf: decode capture: %w", err)
 	}
 	doc, err := encodePDF(img, 92)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	s.setPDF(doc)
+	return doc, false, nil
+}
+
+// setPDF remembers the document so it can be read back as a resource.
+func (s *Session) setPDF(doc []byte) {
 	s.shotMu.Lock()
 	s.pdfDoc = doc
 	s.shotMu.Unlock()
-	return doc, nil
 }
 
 // LastPDF returns the most recent PDF export.

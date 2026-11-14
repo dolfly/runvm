@@ -40,7 +40,7 @@ layout: page
 | `h5_wait_for` | `session`、`expression` 或 `selector`、`timeout_ms` | 轮询到条件成立 |
 | `h5_console` | `session`、`clear` | 取回 console 与页面异常 |
 | `h5_screenshot` | `session`、`path` | 截图（PNG），可同时落盘 |
-| `h5_pdf` | `session`、`path` | 导出单页 PDF（栅格） |
+| `h5_pdf` | `session`、`path` | 导出单页 PDF：macOS 矢量打印，其余平台栅格；结果里 `vector` 说明精度 |
 | `h5_close` | `session` | 关掉页面宿主进程 |
 
 `h5_open` 的 `env` 会以 `webframe.env` 暴露给页面；`ephemeral` 默认 `true`，cookie/存储/缓存只留内存。

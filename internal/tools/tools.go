@@ -146,9 +146,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 			"env": objectFields(map[string]any{"type": "string"},
 				"Strings exposed to the page as webframe.env (before any page script)"),
 			"ephemeral": boolean("Keep cookies, storage and cache in memory only (default true)"),
-			"visible":   boolean("Draw the page in a window instead of offscreen; required for h5_screenshot"),
-			"width":     num("Window width when visible (default 1280)"),
-			"height":    num("Window height when visible (default 800)"),
+			"visible":   boolean("Draw the page in a window instead of offscreen; required for h5_screenshot on Linux/Windows"),
+			"width":     num("View width in points (default 1280 when visible). Also the page width of an h5_pdf print, so a hidden 1280x720 view prints a 16:9 document"),
+			"height":    num("View height in points (default 800 when visible)"),
 		}, "target"),
 		Handler: s.h5Open,
 	})
@@ -202,9 +202,11 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 
 	srv.Add(mcp.Tool{
 		Name: "h5_pdf",
-		Description: "Render the page into a single-page PDF and return its path. This is a raster PDF " +
-			"(the page is captured and embedded), not a vector print: WebView exposes no print API. " +
-			"The session must be open with visible=true on Linux.",
+		Description: "Render the page into a single-page PDF and return its path. On macOS this is a real " +
+			"printed PDF (vector: text stays text, the whole scrollable page is included, nothing is cut " +
+			"off at the fold, and the page does not have to be visible). On Linux and Windows it is a " +
+			"raster PDF, because those WebView backends expose no print API yet; the result says which. " +
+			"The raster path needs visible=true on Linux.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from h5_open (opened with visible: true)"),
 			"path":    str("Where to write the PDF (default: <target-slug>.pdf in the working directory)"),
@@ -891,7 +893,7 @@ func (s *Set) h5PDF(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	doc, err := sess.PDF()
+	doc, vector, err := sess.PDF()
 	if err != nil {
 		return nil, err
 	}
@@ -902,10 +904,15 @@ func (s *Set) h5PDF(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := os.WriteFile(path, doc, 0o644); err != nil {
 		return nil, fmt.Errorf("h5_pdf: write %q: %w", path, err)
 	}
+	note := "raster PDF: the page was captured and embedded, not printed (no print API on this platform yet)"
+	if vector {
+		note = "vector PDF: printed by the WebView; text is selectable and the whole page is included"
+	}
 	return map[string]any{
-		"pdf":   path,
-		"bytes": len(doc),
-		"note":  "raster PDF: the page was captured and embedded, not printed",
+		"pdf":    path,
+		"bytes":  len(doc),
+		"vector": vector,
+		"note":   note,
 	}, nil
 }
 

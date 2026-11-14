@@ -68,6 +68,28 @@ func selftest() {
 	}
 	fmt.Printf("selftest: ok — %dx%d, %d distinct colours, %d bytes PNG\n",
 		img.Bounds().Dx(), img.Bounds().Dy(), len(colors), len(png))
+
+	// The PDF path is a separate capability: raster everywhere, vector on the
+	// backends that can print. Saying which one this machine produced is the
+	// difference between a check and a claim.
+	doc, vector, err := sess.PDF()
+	if err != nil {
+		if strings.Contains(err.Error(), "not supported") {
+			fmt.Fprintf(os.Stderr, "selftest: skipped, pdf not supported on this platform: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "selftest: pdf: %v\n", err)
+		os.Exit(1)
+	}
+	if !bytes.HasPrefix(doc, []byte("%PDF")) {
+		fmt.Fprintf(os.Stderr, "selftest: pdf does not start with %%PDF\n")
+		os.Exit(1)
+	}
+	kind := "raster"
+	if vector {
+		kind = "vector"
+	}
+	fmt.Printf("selftest: ok — %s PDF, %d bytes\n", kind, len(doc))
 }
 
 // distinctColors samples the image and reports how many different colours it

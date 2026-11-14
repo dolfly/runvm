@@ -1,7 +1,7 @@
-github.com/dolfly/glaze v0.2.1 h1:q+SwhMrLoBcv51AJGraOZNGOxH+gTOsGPo6px0R8hK0=
-github.com/dolfly/glaze v0.2.1/go.mod h1:dwHyKQlawNYk1F95skbEQal++KXwnVwPFpf3fCU26iQ=
-github.com/dolfly/webframe-fork v0.2.0 h1:kKQpQzyn+x2WJvLjHpYYod1NaHBf9ObrLPZTp3m+3j8=
-github.com/dolfly/webframe-fork v0.2.0/go.mod h1:qjqWlUdDt1+2kGHQtm9+bLdAIKb6BUnzxu71vcJakc0=
+github.com/dolfly/glaze v0.4.0 h1:zOfg8WtFNqJwTJ8lo+SkyeMo3FwGhA12iJRfanIU4NA=
+github.com/dolfly/glaze v0.4.0/go.mod h1:dwHyKQlawNYk1F95skbEQal++KXwnVwPFpf3fCU26iQ=
+github.com/dolfly/webframe-fork v0.3.0 h1:/d99d3eo2VAIlHSW+hRzGhSa/ETBNUGkjsJwVZBc9gg=
+github.com/dolfly/webframe-fork v0.3.0/go.mod h1:uuv1J0cM1D/JZCro7f+zYIE2pu9n9jF24AA+8iz8z/o=
 github.com/ebitengine/purego v0.11.3 h1:OB+JLpdm7ioymhyA+6s5kbb/uOuYycAgL8NNTFc5MLg=
 github.com/ebitengine/purego v0.11.3/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
 github.com/isesword/golem v0.2.1 h1:nrL6lEggHei+S8lFCKnD21/X1V1RmRlcIHK4R2/4cuo=
