@@ -25,6 +25,8 @@ layout: page
 
 **池的重建计数**。`PoolStats` 只有 Size/InUse/Idle，`engines.created` 是自己加的；`MaxUses` 回收次数还没有专门暴露。
 
+**iOS 的 `.so`**。golem 已经能加载 Mach-O arm64 并按魔数选择 Darwin 人格：本机实测 `add(3,4)=7`、`getpid()=4242` 都通（[调研](research/ios-so.md)）。缺的是 `libSystem` 那一层——iOS 没有可分发的共享库，碰 `malloc`/`objc_msgSend` 的库要靠宿主侧按符号提供实现，而 Darwin 的 `ReplaceFns` 目前还在 golem 的 `internal` 里，外部模块注册不了。纯计算类（签名、加解密）现在就能跑，第一步是把 runvm 里「按格式分流」做掉。
+
 **HTTP 的 SSE 重放**。没有实现事件 id + `Last-Event-ID`——本服务不主动推消息，暂时不需要。
 
 ## 刻意没做
@@ -39,3 +41,4 @@ layout: page
 
 - [Windows 截图：为什么按自己的 pid 找不到窗口](research/windows-capture.md)
 - [macOS snapshot：block ABI 的可行性评估](research/macos-snapshot.md)
+- [iOS `.so`：能不能像 Android 那样在本机加载执行](research/ios-so.md)
