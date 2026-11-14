@@ -25,6 +25,7 @@ type hostMsg struct {
 	Own   bool   `json:"own,omitempty"`
 
 	PNG []byte `json:"png,omitempty"` // base64 on the wire, per encoding/json
+	PDF []byte `json:"pdf,omitempty"` // same encoding; the host's own print output
 
 	ID     int    `json:"id,omitempty"`
 	OK     *bool  `json:"ok,omitempty"`

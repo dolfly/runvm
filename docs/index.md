@@ -51,7 +51,7 @@ layout: page
 | Android 后端（bionic + unicorn） | ✅ | ✅ | ✅ |
 | H5 页面（系统 WebView） | ✅ WebKitGTK | ✅ WebView2 | ✅ WKWebView |
 | 截图 | ✅ Xvfb + xwd | ✅ PrintWindow | ✅ WKWebView snapshot |
-| PDF（栅格） | ✅ | ✅ | ✅ |
+| PDF | ✅ 栅格 | ✅ 栅格 | ✅ **矢量打印** |
 
 三平台都在 CI 里真跑：Linux 跑完整 e2e（39 项断言），macOS/Windows 跑 `doctor` + `selftest`，后者会真的开页面、截图、**统计颜色数**确认不是白屏。
 

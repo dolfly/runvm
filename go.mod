@@ -9,11 +9,12 @@ require (
 )
 
 require (
-	github.com/dolfly/glaze v0.2.1 // indirect
+	github.com/dolfly/glaze v0.4.0 // indirect
 	github.com/ebitengine/purego v0.11.3 // indirect
 )
 
-// webframe is the one fork runvm carries: it exposes Frame.Snapshot(), which
-// reaches the WKWebView snapshot in github.com/dolfly/glaze. That module is
-// required by its own path, so there is no glaze replace here.
-replace tractor.dev/webframe => github.com/dolfly/webframe-fork v0.2.0
+// webframe is the one fork runvm carries: it exposes Frame.Snapshot() and
+// Frame.PrintPDF(), which reach the WKWebView capture and print routines in
+// github.com/dolfly/glaze. That module is required by its own path, so there
+// is no glaze replace here.
+replace tractor.dev/webframe => github.com/dolfly/webframe-fork v0.3.0

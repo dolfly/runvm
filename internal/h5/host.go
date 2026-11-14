@@ -141,6 +141,24 @@ func RunHost(target string, env map[string]string, ephemeral bool) int {
 					ok := true
 					emit(hostMsg{ID: id, OK: &ok, PNG: png})
 				}()
+			case "printpdf":
+				// Like snapshot, this must not run on the UI thread: WebKit
+				// completes the print on the main queue this process pumps.
+				id := cmd.ID
+				go func() {
+					doc, err := f.PrintPDF()
+					if err != nil {
+						ok := false
+						msg := hostMsg{ID: id, OK: &ok, Error: err.Error()}
+						if errors.Is(err, webframe.ErrPrintUnsupported) {
+							msg.Error = "unsupported: " + err.Error()
+						}
+						emit(msg)
+						return
+					}
+					ok := true
+					emit(hostMsg{ID: id, OK: &ok, PDF: doc})
+				}()
 			case "close":
 				f.Terminate()
 				return

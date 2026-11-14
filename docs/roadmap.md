@@ -14,12 +14,12 @@ layout: page
 | Android 后端 | ✅ | ✅ | ✅ |
 | H5 页面 | ✅ | ✅ | ✅ |
 | 截图 | ✅ | ✅ | ✅ |
-| PDF（栅格） | ✅ | ✅ | ✅ |
+| PDF | ✅ 栅格 | ✅ 栅格 | ✅ 矢量 |
 | CI 验证 | 完整 e2e（39 项） | doctor + selftest | doctor + selftest |
 
 ## 还没做
 
-**矢量 PDF**。现在的 PDF 是"截图 + 嵌入"，三平台都能出，但是栅格。矢量要三平台的打印 API（`WKWebView.printOperation`、`ICoreWebView2_16.PrintToPdfAsync`、`webkit_print_operation`），和 macOS 截图一样需要继续扩 fork。
+**矢量 PDF 的另外两个平台**。macOS 已经打通：`WKWebView.createPDFWithConfiguration:` 由 `dolfly/glaze` v0.4.0 的 `PrintPDF()` 承载，`dolfly/webframe-fork` v0.3.0 透出 `Frame.PrintPDF()`，`h5_pdf` 先打印、打印不了才回落到栅格，结果里的 `vector` 字段说明是哪一种。剩下 Windows 的 `ICoreWebView2_16.PrintToPdfAsync`（COM，走 purego）和 Linux 的 `webkit_print_operation`（GTK 打印设置指向文件）。
 
 **linux-musl / Alpine**。purego 在无 cgo 时只支持 glibc，Alpine 需要 `CGO_ENABLED=1` + `zig cc` 的独立工具链，所以发布矩阵只有 glibc linux / darwin / windows。
 

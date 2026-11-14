@@ -109,6 +109,6 @@ buffer 参数是刻意设计:很多 native 接口不返回值,而是往出参里
 ## 7. 刻意不做的事
 
 - **不做通用 RPC**:MCP 是唯一入口,避免第二套语义漂移。
-- **不做截图/PDF**:webframe 没暴露,假实现会误导模型;要做就在 `web-host` 里正经注入 CDP。
+- **不做 CDP 注入**:截图和 PDF 都走 WebView 自己的 API(`Snapshot` / `PrintPDF`),平台没有就如实报不支持,不自己造一层。
 - **不做容器编排**:一个 runvm 进程就是一批评测的全部,再往上应该由 CI 负责。
 - **不缓存 emulator**:golem 有 engine pool,但那是"多引擎共享只读页"的优化,和 MCP 的会话语义重叠;等有压测数据再说。
