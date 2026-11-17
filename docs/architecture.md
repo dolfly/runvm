@@ -16,7 +16,7 @@ runvm（MCP 服务，进程常驻）
    ├── internal/tools     20 个工具的参数校验与编排
    ├── internal/session   会话注册表（泛型 + last_used）
    ├── internal/android   golem 会话池 + ELF 导出表 + JNI 桩
-   ├── internal/ios       golem 会话池 + Mach-O 导出/导入表（无 JNI）
+   ├── internal/ios       golem 会话池 + Mach-O 符号表 / bind 流解析（无 JNI）
    └── internal/h5        webframe 宿主（子进程）+ 平台截图
 ```
 

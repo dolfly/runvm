@@ -37,15 +37,24 @@ layout: page
 
 | 工具 | 关键参数 | 作用 |
 |---|---|---|
-| `ios_open` | `dylib`、`engine`、`pool`、`max_uses` | 加载 Mach-O arm64 dylib，跑 init，返回会话 |
-| `ios_symbols` | `session`、`filter`、`limit` | 列导出符号（直接读 Mach-O，不依赖会话能否启动） |
-| `ios_imports` | `session` | 列 dylib 需要的外部符号——这些没有实现 |
+| `ios_open` | `dylib`、`engine`、`pool`、`max_uses` | 加载 Mach-O arm64 dylib，跑 init，返回会话（含 `system_libs`：`LC_LOAD_DYLIB` 声明的依赖） |
+| `ios_symbols` | `session`、`filter`、`limit` | 列导出符号与导入符号（直接读 Mach-O，不依赖会话能否启动） |
+| `ios_imports` | `session` | 列 dylib 需要的外部符号 + 声明的依赖库——这些都没有实现 |
 | `ios_call` | `session`、`symbol`、`args` | 调导出函数 |
 | `ios_close` | `session` | 释放 ios 会话 |
 
 `ios_call` 的 `args` 与 `android_call` 相同：整数、字符串（`char*`）、`{"buffer": n}`，最多 8 个。符号名**不带前导下划线**（Mach-O 的 `_add` 在这里是 `add`）。
 
-**边界，写在这里而不是藏在错误里**：只有 dylib 自己定义的符号可调用。它从 libSystem / Foundation / Objective-C 导入的东西（`malloc`、`memcpy`、`objc_msgSend` …）既没有 guest 实现，也注册不了宿主桩——golem 的 Darwin `ReplaceFns` 还在 `internal` 里——所以调到这些符号时 golem 返回乐观的 0，不报错。`ios_imports` 和 `ios_symbols` 的 `imports` 字段就是用来在调用前把这类符号认出来的。这条边界是第二阶段的入口（`ios_hook`），第一阶段不做。
+**导入名是怎么读出来的**：`LC_SYMTAB` 的未定义符号表只是一部分，现代 arm64 dylib 的导入主要写在 `LC_DYLD_INFO` 的 bind 流或 `LC_DYLD_CHAINED_FIXUPS` 的导入表里，这两处也一并读。只读符号表时，真实的 clang dylib 会报成“什么都不缺”，然后调用方对着 `not found` 以为是自己拼错了符号名。`system_libs` 则是 `LC_LOAD_DYLIB` 的字面声明，所以它总该是 `/usr/lib/libSystem.B.dylib` 这样的真实路径，而不是从符号名反推的猜测。
+
+**边界，写在这里而不是藏在错误里**：只有 dylib 自己定义的符号可调用。它从 libSystem / Foundation / Objective-C 导入的东西（`malloc`、`memcpy`、`objc_msgSend` …）既没有 guest 实现，也注册不了宿主桩——golem 的 Darwin `ReplaceFns` 还在 `internal` 里——所以要分两种情形：
+
+- 直接 `ios_call` 这些名字：报 `imported by the dylib but has no implementation`，不返回数字；
+- dylib 内部调它：golem 绑的是乐观桩，拿到 0（例如包了 `strlen` 的函数返回 0 而不是长度），不报错。
+
+第二种是设计上的取舍而不是 bug，想提前知道缺什么就看 `ios_imports`。这条边界是第二阶段的入口（`ios_hook`），第一阶段不做。
+
+**加载限制**：golem 不模拟 dyld 的 lazy stub binder，带 lazy/weak bind 流的 dylib 会被拒；`clang -Wl,-bind_at_load` 能绕开，runvm 会把这个建议直接接在错误信息后面。
 
 ## H5
 
