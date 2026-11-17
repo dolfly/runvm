@@ -101,7 +101,7 @@ docker run --rm runvm version
 make build            # -> bin/runvm
 
 # 2. 自检:会真的启动一个 emulator 和一个 WebView
-./bin/runvm doctor
+make doctor
 #   ✓ bionic sysroot  /path/to/golem/assets
 #   ✓ cpu engine      booted bionic in 42ms
 #   ✓ webview         about:blank ready in 812ms
@@ -259,7 +259,8 @@ make build     # 带 unicorn 引擎
 make test      # 单元测试(不启动 emulator/浏览器)
 make vet
 make fmt
-./bin/runvm doctor
+make doctor      # 自检要单独构建：golem 靠二进制里的模块路径找 bionic 资产，
+                 # 而 make build 用的 -trimpath 会把那段路径抹掉
 ```
 
 代码结构:

@@ -28,8 +28,13 @@ fmt-check:
 dist:
 	./scripts/release.sh $(VERSION)
 
-## doctor: probe this machine by actually starting both backends
-doctor: build
+## doctor: probe this machine by actually starting both backends.
+## Deliberately built WITHOUT -trimpath: golem locates its bionic sysroot through
+## runtime.Caller, i.e. the module path embedded in the binary, and -trimpath
+## strips it — so a trimmed binary reports "missing sysroot" on a machine that
+## has one. Release builds keep -trimpath; this target is a local probe.
+doctor:
+	CGO_ENABLED=0 go build -tags unicorn -ldflags "$(LDFLAGS)" -o bin/runvm ./cmd/runvm
 	./bin/runvm doctor
 
 clean:

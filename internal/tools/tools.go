@@ -99,8 +99,8 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Description: "List the symbols an iOS dylib exports and imports. Exports are callable with ios_call. " +
 			"Imports are the names libSystem/ObjC would have to provide: calling one directly reports " +
 			"'imported but has no implementation', while a call the dylib makes to one internally gets " +
-			"golem's optimistic stub (0). Both lists are read from the file on disk, so this still needs a " +
-			"session id.",
+			"golem's optimistic stub (0). The file is read from disk rather than through the running " +
+			"emulator, but the session is still what names it — after ios_close there is no path to read.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 			"filter":  str("Case-insensitive substring filter on the symbol name"),

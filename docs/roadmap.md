@@ -39,7 +39,7 @@ layout: page
 | 能力 | 落地 |
 |---|---|
 | Mach-O arm64 加载 + init | `ios_open`（无 `assets:` 段、无 auxv，Darwin 默认人格） |
-| 导出符号发现 | `ios_symbols`（读 Mach-O 符号表，不用引擎、不用会话） |
+| 导出符号发现 | `ios_symbols`（读磁盘上的 Mach-O 符号表，不启动引擎，但仍要一个 ios 会话 id 定位文件） |
 | 导入符号与依赖库 | `ios_imports`（同时读 `LC_SYMTAB` 与 bind 流 / chained fixups）与 `ios_open` 结果里的 `system_libs`（`LC_LOAD_DYLIB` 声明） |
 | 调导出函数 | `ios_call`（整数 / `char*` / 出参缓冲，最多 8 个，符号名不带前导下划线） |
 | 引擎池与会话治理 | `pool` / `max_uses`，与 android、h5 共用 `RUNVM_MAX_SESSIONS` |

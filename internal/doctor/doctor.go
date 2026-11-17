@@ -50,14 +50,24 @@ func Run(version string) Report {
 	r := Report{Version: version, Go: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH}
 
 	assets := android.AssetsDir()
+	present := android.AssetsPresent(assets)
+	if !present {
+		// golem finds its sysroot through runtime.Caller, so the answer depends
+		// on how this binary was built: -trimpath strips the module path and the
+		// lookup silently falls back to a relative "assets". Say that out loud,
+		// because otherwise the report blames the machine for a build flag.
+		assets = assets + " (not found)"
+	}
 	r.Checks = append(r.Checks, Check{
 		Name:   "bionic sysroot",
-		OK:     android.AssetsPresent(assets),
+		OK:     present,
 		Detail: assets,
-		Hint:   "set RUNVM_ASSETS to golem's assets directory (assets/android/sdk23)",
+		Hint: "set RUNVM_ASSETS (or GOLEM_ASSETS) to golem's assets directory " +
+			"(assets/android/sdk23); a binary built with -trimpath cannot find golem's " +
+			"module assets on its own",
 	})
 
-	if ok := android.AssetsPresent(assets); ok {
+	if present {
 		start := time.Now()
 		sess, err := android.Open("", android.OpenOptions{})
 		switch {
