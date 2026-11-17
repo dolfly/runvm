@@ -1,0 +1,14 @@
+# runvm 的本地开发环境：把 MCP over HTTP 跑起来。
+#
+#   multica env start mcp
+#
+# 只绑回环（runvm http 在非回环地址上强制要求 token）；端口由 daemon 分配，
+# 所以这里用 $MULTICA_PORT 而不是 8765。doctor 里 android 后端需要
+# golem 的 bionic 资产（RUNVM_ASSETS），本机没配时 h5 后端仍然可用。
+
+[environments.mcp]
+label = "runvm MCP (HTTP)"
+start = "go build -tags unicorn -o bin/runvm ./cmd/runvm && exec ./bin/runvm http -addr 127.0.0.1:$MULTICA_PORT"
+url = "http://localhost:$MULTICA_PORT/mcp"
+ready = "http://localhost:$MULTICA_PORT/mcp"
+ttl = "168h"
