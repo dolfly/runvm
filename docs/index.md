@@ -26,7 +26,7 @@ layout: page
 
 **Android** —— 用 [golem](https://github.com/isesword/golem) 在本机加载 `.so`，映射真实的 bionic（`libc/libm/libdl`），执行它自己的 AArch64 指令。**不需要 JVM、不需要真机、不需要 adb**。库的 `init_array` 与 `JNI_OnLoad` 都会跑，导出函数可以直接调用。
 
-**iOS** —— 同一个 golem 模拟器，按容器格式分流到 Darwin 人格：加载 Mach-O arm64 的 dylib，不需要 bionic sysroot、不建 JNI 表。**第一阶段只做纯计算**：dylib 自己定义的导出函数能调用，它从 libSystem / Objective-C 导入的东西没有实现，`ios_imports` 会把这类名字先列出来。
+**iOS** —— 同一个 golem 模拟器，按容器格式分流到 Darwin 人格：加载 Mach-O arm64 的 dylib，不需要 bionic sysroot、不建 JNI 表。**第一阶段只做纯计算**：dylib 自己定义的导出函数能调用；它从 libSystem / Objective-C 导入的符号没有实现——直接调会明确报错，库内部调则拿到 golem 的乐观桩 0。`ios_imports` 把导入名和依赖库都列出来，先看清再调。
 
 **H5** —— 用 [webframe](https://github.com/tractordev/webframe) 把页面跑在系统自带的 WebView 里（WebKitGTK / WKWebView / WebView2）。隐藏运行、不节流，可以执行任意 JS、等待异步 UI、截图、导出 PDF。
 
