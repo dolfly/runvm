@@ -12,6 +12,7 @@ layout: page
 | | Linux | Windows | macOS |
 |---|---|---|---|
 | Android 后端 | ✅ | ✅ | ✅ |
+| iOS dylib（纯计算） | ✅ 需 libunicorn | ✅ 需 libunicorn | ✅ 需 libunicorn |
 | H5 页面 | ✅ | ✅ | ✅ |
 | 截图 | ✅ | ✅ | ✅ |
 | PDF | ✅ 栅格 | ✅ 栅格 | ✅ 矢量 |
@@ -25,9 +26,25 @@ layout: page
 
 **池的重建计数**。`PoolStats` 只有 Size/InUse/Idle，`engines.created` 是自己加的；`MaxUses` 回收次数还没有专门暴露。
 
-**iOS 的 `.so`**。golem 已经能加载 Mach-O arm64 并按魔数选择 Darwin 人格：本机实测 `add(3,4)=7`、`getpid()=4242` 都通（[调研](research/ios-so.md)）。缺的是 `libSystem` 那一层——iOS 没有可分发的共享库，碰 `malloc`/`objc_msgSend` 的库要靠宿主侧按符号提供实现，而 Darwin 的 `ReplaceFns` 目前还在 golem 的 `internal` 里，外部模块注册不了。纯计算类（签名、加解密）现在就能跑，第一步是把 runvm 里「按格式分流」做掉。
+**iOS 的 libSystem 那一层**。第一阶段（Mach-O 分流 + `ios_open`/`ios_call`）已落地，见下。剩下的是 iOS 没有可分发的共享库这件事：碰 `malloc`/`objc_msgSend` 的库要靠宿主侧按符号提供实现，而 Darwin 的 `ReplaceFns` 目前还在 golem 的 `internal` 里，外部模块注册不了。
 
 **HTTP 的 SSE 重放**。没有实现事件 id + `Last-Event-ID`——本服务不主动推消息，暂时不需要。
+
+## iOS 后端（第一阶段已做）
+
+**分流点是容器格式，不是扩展名**。golem 自己按魔数选人格（`loader.Sniff`），runvm 在 `android.Open` 之前判一次 Mach-O：是就不喂 bionic sysroot、不建 JNI 表，直接交给 Darwin 人格。`android_open` 遇到 Mach-O 也会转到这条路上，返回 `ios-N` 会话（结果里带 `routed_to: "ios"`），调用方不必换工具。
+
+已具备：
+
+| 能力 | 落地 |
+|---|---|
+| Mach-O arm64 加载 + init | `ios_open`（无 `assets:` 段、无 auxv，Darwin 默认人格） |
+| 导出符号发现 | `ios_symbols` / `ios_imports`（直接读 Mach-O，不用引擎、不用会话） |
+| 调导出函数 | `ios_call`（整数 / `char*` / 出参缓冲，最多 8 个，符号名不带前导下划线） |
+| 引擎池与会话治理 | `pool` / `max_uses`，与 android、h5 共用 `RUNVM_MAX_SESSIONS` |
+| doctor / selftest 自检 | 仓库内嵌一个 arm64 dylib 探针，`add(3,4)` 期望 7——是真跑，不是解析 |
+
+**没做，而且这一层做不到的**：libSystem / Foundation / Objective-C。dylib 从系统库导入的符号既没有 guest 实现，也注册不了宿主桩，所以调到它们拿到的是乐观的 0（`ios_imports` 把这些名字先列出来，工具描述也写明了"未实现符号返回 not found"）。这道门是第二阶段 `ios_hook` 的前提：等 golem 把 Darwin 的 `ReplaceFns` 开出门面。
 
 ## 刻意没做
 

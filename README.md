@@ -2,7 +2,7 @@
 
 **文档站:** <https://dolfly.github.io/runvm/> · 产品介绍、快速开始、工具参考、架构与运维
 
-把「虚拟测试环境」做成模型能直接调用的工具:一套 MCP 服务器,两个后端。
+把「虚拟测试环境」做成模型能直接调用的工具:一套 MCP 服务器,两个后端,和一个按容器格式分流的原生后端。
 
 - **Android**:用 [golem](https://github.com/isesword/golem) 在本机加载一个 AArch64 的 `.so`,跑它的 `init_array` / `JNI_OnLoad`,然后把导出函数直接调用起来——不需要 JVM、不需要真机、不需要 adb。
 - **H5**:用 [webframe](https://github.com/tractordev/webframe) 把页面跑在系统自带的 WebKit 里,可以执行任意 JS、点击、断言,拿回真实的 DOM 结果。
@@ -19,12 +19,15 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>14 个工具"]
-  S --> REG["session.Store<br/>android-N / h5-N"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>20 个工具"]
+  S --> REG["session.Store<br/>android-N / ios-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
+  REG --> I["ios 后端<br/>in-process"]
   REG --> H["h5 后端<br/>进程外"]
   A --> G["golem emulator<br/>bionic libc + unicorn(purego)"]
   G --> SO[("libfoo.so<br/>AArch64")]
+  I --> G
+  G --> DY[("libfoo.dylib<br/>Mach-O arm64, no bionic")]
   H -->|"JSONL 管道"| W["runvm web-host<br/>webframe.Frame"]
   W --> K["系统 WebView<br/>WebKitGTK / WKWebView / WebView2"]
 ```
@@ -35,13 +38,15 @@ flowchart TB
 |---|---|---|
 | MCP 传输 | `internal/mcp` | JSON-RPC 2.0、`initialize`/`tools/list`/`tools/call`,零依赖 |
 | 工具与会话 | `internal/tools`、`internal/session` | 参数校验、会话 ID、生命周期 |
-| 后端 | `internal/android`、`internal/h5` | 真正加载 .so / 真正跑页面 |
+| 后端 | `internal/android`、`internal/ios`、`internal/h5` | 真正加载 .so / .dylib / 真正跑页面 |
 
 ## 为什么是这两个后端,以及为什么这样接
 
 **Android 用 golem 而不是 adb/模拟器**:golem 是纯 Go 的 native 库模拟框架,把 bionic(`libc/libm/libdl`)和目标 `.so` 一起映射进一块虚拟地址空间,指令由 unicorn 执行。产物是单个二进制、`CGO_ENABLED=0`,可以在 CI 容器里跑签名/加密这类"必须调 native 才知道结果"的逻辑。runvm 只做会话层:一个会话一个 emulator,串行化调用(golem 的 emulator 不是并发安全的),并发靠多开会话。
 
 **H5 用子进程而不是同进程**:webframe 的 `Frame` 必须建在主 goroutine 上,`Run()` 会一直阻塞它——一个页面独占一个进程。而 MCP 服务器要长期存活并服务多个会话,两者无法共存于一个主线程。所以每个页面是一个 `runvm web-host` 子进程,父子之间走一行一个 JSON 的管道:控制流清晰,页面崩了也不会带走 MCP 服务器。
+
+**iOS 的 dylib 和 Android 的 `.so` 走同一个模拟器,但不是一个后端**。分流点是**容器格式**而不是扩展名或调用方的意图:golem 自己按魔数选人格(`loader.Sniff`),所以 runvm 只需要在 `android.Open` 之前看一眼——是 Mach-O 就不喂 bionic sysroot、不建 JNI 表,交给 golem 的 Darwin 人格。`android_open` 遇到 Mach-O 也会自动转到这条路上,返回 `ios-N` 会话。诚实的边界是"纯计算":dylib 自己定义的符号能跑,它从 libSystem / Objective-C 导入的东西(`malloc`、`objc_msgSend` …)没有实现也没有宿主桩可注册(Darwin 的 `ReplaceFns` 还在 golem 的 `internal` 里),调用会返回 0,`ios_imports` 先把这些名字列出来。
 
 `web-host` 里补了两件 webframe 库不做、但库的调用方必须自己做的事(它的 CLI 里做了):无 `DISPLAY` 时拉起私有 Xvfb,以及把本地路径转成 `file://` URL。
 
@@ -125,7 +130,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 两个后端是否可用、有几个会话(**不启动任何东西**) |
+| `runvm_status` | 各后端是否可用、有几个会话(**不启动任何东西**) |
 | `android_open` | 加载 `.so`,跑 init,返回 `android-N` |
 | `android_symbols` | 列出导出函数(直接读 ELF,不依赖会话能否启动) |
 | `android_hook` | 把导出函数替换成"返回常量"的桩,用来摘掉依赖再测周边逻辑 |
@@ -133,6 +138,11 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `android_java_stubs` | 列出当前会话应答了哪些 Java 回调 |
 | `android_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `android_close` | 释放 emulator |
+| `ios_open` | 加载 Mach-O arm64 dylib,返回 `ios-N`(无 JNI、无 bionic) |
+| `ios_symbols` | 列出导出符号(直接读 Mach-O,不依赖会话能否启动) |
+| `ios_imports` | 列出 dylib 需要的外部符号——这些没有实现,调了会返回 0 |
+| `ios_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
+| `ios_close` | 释放 ios 会话 |
 | `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
 | `h5_eval` | 在页面里执行 JS,返回结果(自动 await Promise) |
 | `h5_wait_for` | 轮询直到表达式为真或选择器命中,返回当时的取值 |
@@ -147,6 +157,8 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 {"args": ["hello"]}                 // char*,自动拷进 guest 内存
 {"args": [{"buffer": 64}, 20]}      // 出参:64 字节缓冲区,调用后读回 hex/ascii
 ```
+
+`ios_call` 的 `args` 规则与 `android_call` 相同,符号名不带前导下划线(Mach-O 的 `_add` 在 golem 里是 `add`)。
 
 `android_open` 还可以开一个**引擎池**(`"pool": 4`):多个 AArch64 引擎共享 `.so` 的只读页,同一会话的调用就能真并行。默认 1,即一次一个调用。
 
@@ -177,7 +189,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `RUNVM_MAX_SESSIONS` | 8 | android + h5 会话总数上限,超了直接报错并提示关哪个 |
+| `RUNVM_MAX_SESSIONS` | 8 | android + ios + h5 会话总数上限,超了直接报错并提示关哪个 |
 | `RUNVM_IDLE_TIMEOUT` | 关闭 | 超过这么久没被使用的会话自动关闭,如 `30m` |
 
 `runvm_status` 会报当前限制与每个 android 会话的 `last_used`。回收是按会话粒度的:一个被遗弃的页面或模拟器应该只花掉一个定时器,而不是一直占着内存。
@@ -236,6 +248,7 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
   - 没有网络拦截。
 - **PDF:macOS 是矢量的**。`h5_pdf` 先让页面自己打印(WKWebView `createPDFWithConfiguration:`,由 `dolfly/glaze` v0.4.0 的 `PrintPDF()` 与 `dolfly/webframe-fork` v0.3.0 的 `Frame.PrintPDF()` 承载):文本还是文本、滚动内容的整页都在、而且不需要 `visible`。Linux/Windows 仍是"截图 + 嵌入"的栅格 PDF。返回值里的 `vector` 字段说明这一次拿到的是哪一种,工具描述也不再自称矢量。
 - **平台覆盖到"能启动",没到"全功能"**。CI 在 macOS(arm64)与 Windows(amd64)上跑 build + 单测 + `doctor`,`doctor` 会真的启动 WKWebView / WebView2 并加载一个页面(macOS 3.6s、Windows 8.4s 就绪),bionic 也都在 20ms 内启动。**截图三平台都有,PDF 的矢量版本只有 macOS**:Linux/Windows 的栅格 PDF 依赖抓屏,所以要 `visible: true`。
+- **iOS 只到"纯计算"**。Mach-O arm64 的 dylib 能加载、能调自己定义的导出函数(`add`、`via_fptr_table`、直接 `svc #0x80` 的 Darwin 系统调用都实测通过),但 libSystem / Foundation / Objective-C 那一层没有:外部模块注册不了 Darwin 的宿主桩,碰 `malloc` 或 `objc_msgSend` 的库拿到的是乐观的 0。等 golem 把 Darwin 的 `ReplaceFns` 开出门面(`ios_hook` 的第二阶段)之前,这个边界不会变。工具描述里写明了这一点,因为"函数返回 0"看起来很像"函数就是返回 0"。
 - **`go.mod` 里有一条 `replace`**。webframe 把 glaze 钉在作者的 fork 上,而 Go 会忽略依赖里的 `replace`,所以本模块必须重复一遍;升级 webframe 时这里要跟着改。
 
 ## 开发
@@ -253,11 +266,12 @@ make fmt
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   14 个工具的参数校验与调用编排
+internal/tools/   20 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
+internal/ios/     golem 会话池 + Mach-O 导出/导入表(无 JNI)
 internal/h5/      webframe 宿主(子进程)与驱动
-internal/doctor/  真实探测两个后端
+internal/doctor/  真实探测各后端
 ```
 
 ## 依赖与致谢

@@ -33,6 +33,16 @@ func selftest() {
 		os.Exit(1)
 	}
 
+	// The iOS path first: it needs no window, so it is the one check that
+	// runs the same way on every platform with a CPU engine.
+	switch code := selftestIOS(); code {
+	case 0:
+	case 2:
+		fmt.Fprintln(os.Stderr, "selftest: skipped, iOS probe needs a CPU engine (libunicorn)")
+	default:
+		os.Exit(code)
+	}
+
 	sess, err := h5.Open(page, h5.OpenOptions{Visible: true, Width: 640, Height: 400, Ephemeral: true})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "selftest: open page: %v\n", err)

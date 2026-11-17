@@ -8,6 +8,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -17,13 +18,14 @@ import (
 
 	"github.com/dolfly/runvm/internal/android"
 	"github.com/dolfly/runvm/internal/h5"
+	"github.com/dolfly/runvm/internal/ios"
 	"github.com/dolfly/runvm/internal/mcp"
 	"github.com/dolfly/runvm/internal/session"
 )
 
 // Limits keeps one forgotten session from becoming a leaked emulator.
 type Limits struct {
-	// MaxSessions caps android+h5 sessions together; 0 means unlimited.
+	// MaxSessions caps android+ios+h5 sessions together; 0 means unlimited.
 	MaxSessions int
 	// IdleTimeout closes sessions unused for this long; 0 disables reaping.
 	IdleTimeout time.Duration
@@ -34,6 +36,7 @@ type Set struct {
 	Version string
 	Limits  Limits
 	Android *session.Store[*android.Session]
+	IOS     *session.Store[*ios.Session]
 	H5      *session.Store[*h5.Session]
 }
 
@@ -43,6 +46,7 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Version: version,
 		Limits:  limits,
 		Android: session.New[*android.Session]("android"),
+		IOS:     session.New[*ios.Session]("ios"),
 		H5:      session.New[*h5.Session]("h5"),
 	}
 	srv := mcp.NewServer("runvm", version)
@@ -58,9 +62,10 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Name: "android_open",
 		Description: "Load an Android native library (.so) into a golem emulator and return a session id. " +
 			"Runs the library's DT_INIT/init_array and JNI_OnLoad, exactly as a device would on load. " +
-			"Use android_symbols afterwards to see what is callable.",
+			"Use android_symbols afterwards to see what is callable. A Mach-O dylib is routed to the " +
+			"iOS path automatically (ios_open/ios_call), because it is a different container format.",
 		InputSchema: object(map[string]any{
-			"so":     str("Path to the .so on this machine (AArch64, ARMv7 or x86_64)"),
+			"so":     str("Path to the .so on this machine (AArch64, ARMv7 or x86_64). A Mach-O dylib also works and yields an ios-N session"),
 			"engine": str(`CPU backend: "unicorn" or empty for the default`),
 			"dex":    str("Optional classes.dex for real class/method metadata in JNI lookups"),
 			"pool": num("Engines to warm, 1-16 (default 1). Above 1, calls to this session run in parallel " +
@@ -68,6 +73,69 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 			"max_uses": num("Recycle an engine after this many calls (default 0: never)"),
 		}, "so"),
 		Handler: s.androidOpen,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "ios_open",
+		Description: "Load an iOS/Darwin dylib (Mach-O, arm64) into a golem emulator and return a session id. " +
+			"No Java runtime, no JNI, no bionic sysroot: the Darwin personality is chosen from the file's " +
+			"magic. Only symbols the dylib defines itself resolve — anything it imports from libSystem, " +
+			"Foundation or Objective-C (malloc, memcpy, objc_msgSend, ...) has no implementation here and " +
+			"a call to it returns 0. ios_symbols/ios_imports tell you which is which before you call.",
+		InputSchema: object(map[string]any{
+			"dylib":    str("Path to the Mach-O arm64 dylib on this machine"),
+			"engine":   str(`CPU backend: "unicorn" or empty for the default`),
+			"pool":     num("Engines to warm, 1-16 (default 1). Above 1, calls run in parallel on separate engines"),
+			"max_uses": num("Recycle an engine after this many calls (default 0: never)"),
+		}, "dylib"),
+		Handler: s.iosOpen,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "ios_symbols",
+		Description: "List the symbols an iOS dylib exports and imports. Exports are callable with ios_call; " +
+			"imports are the ones libSystem/ObjC would have to provide, and none of them work. Reads the " +
+			"Mach-O symbol table directly, so it also works before a session is open.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from ios_open"),
+			"filter":  str("Case-insensitive substring filter on the symbol name"),
+			"limit":   num("Maximum symbols to return per section (default 200)"),
+		}, "session"),
+		Handler: s.iosSymbols,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "ios_imports",
+		Description: "List the symbols an iOS dylib imports — what libSystem, Foundation or Objective-C would " +
+			"have to provide for the library to be fully functional. runvm supplies none of them, so a call " +
+			"that touches one returns 0. Use this to explain a result that looks wrong.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from ios_open"),
+		}, "session"),
+		Handler: s.iosImports,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "ios_call",
+		Description: "Call an exported symbol of an iOS dylib and return its value. Arguments are integers, " +
+			"strings (char*) or {\"buffer\": n} for an out-parameter read back after the call. Up to 8. " +
+			"A symbol the dylib imports but cannot resolve reports that explicitly instead of returning a " +
+			"number; nothing here provides libc or Objective-C implementations.",
+		InputSchema: object(map[string]any{
+			"session": str("Session id from ios_open"),
+			"symbol":  str("Exported function name, without the leading underscore"),
+			"args": array("Arguments in ABI order", map[string]any{
+				"type": []string{"number", "string", "object"},
+			}),
+		}, "session", "symbol"),
+		Handler: s.iosCall,
+	})
+
+	srv.Add(mcp.Tool{
+		Name:        "ios_close",
+		Description: "Tear down an iOS session and free its engines.",
+		InputSchema: object(map[string]any{"session": str("Session id from ios_open")}, "session"),
+		Handler:     s.iosClose,
 	})
 
 	srv.Add(mcp.Tool{
@@ -385,8 +453,8 @@ func (s *Set) reserved() error {
 	if s.Limits.MaxSessions <= 0 {
 		return nil
 	}
-	if n := s.Android.Len() + s.H5.Len(); n >= s.Limits.MaxSessions {
-		return fmt.Errorf("session limit reached (%d); close one with android_close/h5_close, "+
+	if n := s.Android.Len() + s.IOS.Len() + s.H5.Len(); s.Limits.MaxSessions > 0 && n >= s.Limits.MaxSessions {
+		return fmt.Errorf("session limit reached (%d); close one with android_close/ios_close/h5_close, "+
 			"or raise RUNVM_MAX_SESSIONS", s.Limits.MaxSessions)
 	}
 	return nil
@@ -437,6 +505,16 @@ func (s *Set) reap(now time.Time) int {
 			closed++
 		}
 	}
+	for _, id := range s.IOS.IDs() {
+		sess, ok := s.IOS.Get(id)
+		if !ok || !sess.LastUsed().Before(cutoff) {
+			continue
+		}
+		if _, gone := s.IOS.Delete(id); gone {
+			_ = sess.Close()
+			closed++
+		}
+	}
 	for _, id := range s.H5.IDs() {
 		sess, ok := s.H5.Get(id)
 		if !ok || !sess.LastUsed().Before(cutoff) {
@@ -455,6 +533,9 @@ func (s *Set) CloseAll() {
 	for _, a := range s.Android.CloseAll() {
 		_ = a.Close()
 	}
+	for _, i := range s.IOS.CloseAll() {
+		_ = i.Close()
+	}
 	for _, w := range s.H5.CloseAll() {
 		_ = w.Close()
 	}
@@ -472,6 +553,10 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 			"assets":    assets,
 			"assets_ok": android.AssetsPresent(assets),
 		},
+		"ios": map[string]any{
+			"sessions": s.IOS.Len(),
+			"scope":    "macho arm64 dylibs; no JNI, no bionic, no libSystem",
+		},
 		"h5": map[string]any{
 			"sessions": s.H5.Len(),
 		},
@@ -481,12 +566,14 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 		},
 		"sessions": map[string]any{
 			"android": s.androidDetails(),
+			"ios":     s.IOS.IDs(),
 			"h5":      s.H5.IDs(),
 		},
 	}, nil
 }
 
-type androidOpenArgs struct {
+// AndroidOpenArgs is the argument shape of android_open.
+type AndroidOpenArgs struct {
 	SO      string `json:"so"`
 	Engine  string `json:"engine"`
 	DEX     string `json:"dex"`
@@ -522,9 +609,15 @@ func (s *Set) androidDetails() []map[string]any {
 }
 
 func (s *Set) androidOpen(ctx context.Context, raw json.RawMessage) (any, error) {
-	var a androidOpenArgs
+	var a AndroidOpenArgs
 	if err := decode(raw, &a); err != nil {
 		return nil, err
+	}
+	// The container format decides the personality, not the extension or the
+	// caller's intent: a Mach-O dylib handed to android_open would otherwise
+	// be fed the bionic sysroot and a JNI table it cannot use.
+	if ios.IsMachO(a.SO) {
+		return s.iosOpen(ctx, raw)
 	}
 	if a.Engine == "" {
 		a.Engine = os.Getenv("RUNVM_ENGINE")
@@ -626,6 +719,202 @@ func (s *Set) androidCall(ctx context.Context, raw json.RawMessage) (any, error)
 		out["buffers"] = res.Buffers
 	}
 	return out, nil
+}
+
+type iosOpenArgs struct {
+	Dylib   string `json:"dylib"`
+	SO      string `json:"so"` // android_open forwards its "so" here on a Mach-O input
+	Engine  string `json:"engine"`
+	Pool    int    `json:"pool"`
+	MaxUses int64  `json:"max_uses"`
+}
+
+func (a *iosOpenArgs) path() string {
+	if a.Dylib != "" {
+		return a.Dylib
+	}
+	return a.SO
+}
+
+// iosOpen is also the iOS branch of android_open: the container format decides
+// the personality, so a Mach-O input never reaches the bionic path.
+func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a iosOpenArgs
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.path() == "" {
+		return nil, errors.New("dylib: required")
+	}
+	if !ios.IsMachO(a.path()) {
+		return nil, fmt.Errorf("ios_open: %s is not a Mach-O dylib (ELF .so files go to android_open)", a.path())
+	}
+	if err := s.reserved(); err != nil {
+		return nil, err
+	}
+
+	mcp.Notify(ctx, 50, "booting the Darwin personality: no bionic sysroot, no JNI")
+	sess, err := ios.Open(a.path(), ios.OpenOptions{Engine: a.Engine, Pool: a.Pool, MaxUses: a.MaxUses})
+	if err != nil {
+		return nil, err
+	}
+	sessID := s.IOS.Add(sess)
+	exports, _ := ios.Exports(a.path())
+	imports, _ := ios.Imports(a.path())
+	mcp.Notify(ctx, 90, "ready: call ios_call")
+
+	// The shape is the iOS one whatever door was used; android_open's caller
+	// only needs the session id to know which tool family to use next.
+	out := map[string]any{
+		"session":         sessID,
+		"arch":            "arm64",
+		"kind":            "macho-dylib",
+		"assets_present":  false,
+		"symbols":         len(exports),
+		"imports":         imports,
+		"jni_on_load":     nil,
+		"init_array":      nil,
+		"system_libs":     []string{},
+		"engine":          sess.Engine(),
+		"pool_size":       sess.PoolSize(),
+		"engines_created": sess.EnginesCreated(),
+	}
+	if len(exports) > 50 {
+		out["exports"] = exports[:50]
+		out["exports_truncated"] = true
+	} else {
+		out["exports"] = exports
+		out["exports_truncated"] = false
+	}
+	if a.SO != "" {
+		// android_open reached here: say which door it took, because the caller
+		// asked for an Android library and got an iOS session.
+		out["routed_to"] = "ios"
+		out["note"] = "Mach-O input: opened with ios_open semantics (no JNI, no bionic); use ios_* tools"
+	}
+	return out, nil
+}
+
+func (s *Set) iosSymbols(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+		Filter  string `json:"filter"`
+		Limit   int    `json:"limit"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.Limit <= 0 {
+		a.Limit = 200
+	}
+	sess, err := s.iosSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	path := sess.Path()
+	all, err := ios.Exports(path)
+	if err != nil {
+		return nil, err
+	}
+	names := ios.SymbolFilter(all, a.Filter)
+	shown := names
+	truncated := false
+	if len(shown) > a.Limit {
+		shown = shown[:a.Limit]
+		truncated = true
+	}
+	imports, _ := ios.Imports(path)
+	return map[string]any{
+		"session":   a.Session,
+		"exports":   shown,
+		"matched":   len(names),
+		"total":     len(all),
+		"truncated": truncated,
+		"imports":   imports,
+	}, nil
+}
+
+func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.iosSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	imports, err := ios.Imports(sess.Path())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"session": a.Session,
+		"imports": imports,
+		"count":   len(imports),
+		"note":    "none of these have an implementation; calling one returns 0",
+	}, nil
+}
+
+func (s *Set) iosCall(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+		Symbol  string `json:"symbol"`
+		Args    []any  `json:"args"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.iosSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	args, err := ios.ParseArgs(a.Args)
+	if err != nil {
+		return nil, fmt.Errorf("ios_call: %w", err)
+	}
+	res, err := sess.Call(ctx, a.Symbol, args)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"symbol": a.Symbol,
+		"value":  res.Value,
+		"signed": int64(res.Value),
+		"i32":    int32(uint32(res.Value)),
+		"hex":    ios.Hex(res.Value),
+	}
+	if res.Buffers != nil {
+		out["buffers"] = res.Buffers
+	}
+	return out, nil
+}
+
+func (s *Set) iosClose(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session string `json:"session"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	sess, err := s.iosSession(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	if _, gone := s.IOS.Delete(a.Session); gone {
+		_ = sess.Close()
+	}
+	return map[string]any{"closed": a.Session, "was": sess.Path()}, nil
+}
+
+// iosSession resolves an ios session id.
+func (s *Set) iosSession(id string) (*ios.Session, error) {
+	sess, ok := s.IOS.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("ios session %q not found (open one with ios_open, or check android_open routed a Mach-O file here)", id)
+	}
+	return sess, nil
 }
 
 func (s *Set) androidHook(_ context.Context, raw json.RawMessage) (any, error) {

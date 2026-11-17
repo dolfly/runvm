@@ -11,7 +11,7 @@ layout: page
 |---|---|
 | `runvm` / `runvm mcp` | MCP 服务，stdio |
 | `runvm http` | 同一套工具，Streamable HTTP |
-| `runvm doctor` | 真启动两个后端自检 |
+| `runvm doctor` | 真启动各后端自检 |
 | `runvm selftest` | 开页面 → 截图 → 数颜色，验证截图链路 |
 | `runvm version` | 版本 |
 | `runvm web-host` | 内部：页面宿主子进程 |

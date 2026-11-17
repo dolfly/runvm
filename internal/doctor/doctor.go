@@ -13,6 +13,8 @@ import (
 
 	"github.com/dolfly/runvm/internal/android"
 	"github.com/dolfly/runvm/internal/h5"
+	"github.com/dolfly/runvm/internal/ios"
+	"github.com/dolfly/runvm/internal/ios/iosprobe"
 )
 
 // Check is one probe result.
@@ -71,6 +73,15 @@ func Run(version string) Report {
 		}
 	}
 
+	iStart := time.Now()
+	if err := checkIosProbe(); err != nil {
+		r.Checks = append(r.Checks, Check{Name: "ios probe", OK: false, Detail: err.Error(),
+			Hint: "ios_open needs a Darwin Mach-O arm64 dylib and a CPU engine; see docs/roadmap.md"})
+	} else {
+		r.Checks = append(r.Checks, Check{Name: "ios probe", OK: true,
+			Detail: fmt.Sprintf("macho add(3,4)=%d in %s", iosprobe.Probe, time.Since(iStart).Round(time.Millisecond))})
+	}
+
 	start := time.Now()
 	page, err := h5.Open("about:blank", h5.OpenOptions{Ephemeral: true, ReadyTimeout: 20 * time.Second})
 	if err != nil {
@@ -88,6 +99,36 @@ func Run(version string) Report {
 		r.Checks = append(r.Checks, c)
 	}
 	return r
+}
+
+// checkIosProbe boots the embedded Mach-O fixture through the Darwin
+// personality and calls add(3,4). It is the one check that proves the iOS
+// path is not just compiling: if golem cannot pick the personality, or no CPU
+// engine is present, the call never returns 7.
+func checkIosProbe() error {
+	path, cleanup, err := iosprobe.Write()
+	if err != nil {
+		return fmt.Errorf("write probe: %w", err)
+	}
+	defer cleanup()
+
+	sess, err := ios.Open(path, ios.OpenOptions{Pool: 1})
+	if err != nil {
+		return fmt.Errorf("ios_open probe: %w", err)
+	}
+	defer sess.Close()
+
+	res, err := sess.Call(context.Background(), "add", []ios.Arg{
+		{Kind: ios.ArgWord, Word: 3},
+		{Kind: ios.ArgWord, Word: 4},
+	})
+	if err != nil {
+		return err
+	}
+	if res.Value != iosprobe.Probe {
+		return fmt.Errorf("add(3,4) returned %d (%s), want %d", res.Value, ios.Hex(res.Value), iosprobe.Probe)
+	}
+	return nil
 }
 
 // Print renders the report for a terminal.

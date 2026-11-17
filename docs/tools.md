@@ -7,7 +7,7 @@ layout: page
 
 传输是 JSON-RPC 2.0：stdio 一行一条消息；HTTP 走 `POST /mcp`。协议版本 `2025-06-18`（兼容 `2025-03-26`、`2024-11-05`）。
 
-约定：工具执行失败返回 `result.isError = true` 与一段可读文本（模型能读、能自己修）；协议层错误才用 JSON-RPC error。单次调用上限 120 秒。会话 ID 形如 `android-1`、`h5-2`。
+约定：工具执行失败返回 `result.isError = true` 与一段可读文本（模型能读、能自己修）；协议层错误才用 JSON-RPC error。单次调用上限 120 秒。会话 ID 形如 `android-1`、`ios-2`、`h5-3`。
 
 ## 通用
 
@@ -30,6 +30,22 @@ layout: page
 `android_call` 的参数：整数、字符串（`char*`）、`{"buffer": n}`（出参，调用后读回 hex/ascii），最多 8 个。负数按补码传。
 
 `android_open` 可以开**引擎池**（`"pool": 4`）：多个 AArch64 引擎共享 `.so` 的只读页，同一会话的调用可并行。默认 1。
+
+`android_open` 按**容器格式**分流：传进来的文件是 Mach-O（dylib）时，它不会去碰 bionic sysroot 和 JNI，而是按下面的 iOS 语义打开并返回 `ios-N` 会话，结果里带 `routed_to: "ios"`。
+
+## iOS
+
+| 工具 | 关键参数 | 作用 |
+|---|---|---|
+| `ios_open` | `dylib`、`engine`、`pool`、`max_uses` | 加载 Mach-O arm64 dylib，跑 init，返回会话 |
+| `ios_symbols` | `session`、`filter`、`limit` | 列导出符号（直接读 Mach-O，不依赖会话能否启动） |
+| `ios_imports` | `session` | 列 dylib 需要的外部符号——这些没有实现 |
+| `ios_call` | `session`、`symbol`、`args` | 调导出函数 |
+| `ios_close` | `session` | 释放 ios 会话 |
+
+`ios_call` 的 `args` 与 `android_call` 相同：整数、字符串（`char*`）、`{"buffer": n}`，最多 8 个。符号名**不带前导下划线**（Mach-O 的 `_add` 在这里是 `add`）。
+
+**边界，写在这里而不是藏在错误里**：只有 dylib 自己定义的符号可调用。它从 libSystem / Foundation / Objective-C 导入的东西（`malloc`、`memcpy`、`objc_msgSend` …）既没有 guest 实现，也注册不了宿主桩——golem 的 Darwin `ReplaceFns` 还在 `internal` 里——所以调到这些符号时 golem 返回乐观的 0，不报错。`ios_imports` 和 `ios_symbols` 的 `imports` 字段就是用来在调用前把这类符号认出来的。这条边界是第二阶段的入口（`ios_hook`），第一阶段不做。
 
 ## H5
 
@@ -67,7 +83,7 @@ layout: page
 
 请求带 `_meta.progressToken` 就会收到 `notifications/progress`。stdio 直接交织在输出里；HTTP 会把该次 POST 升级成 SSE 流。不带 token 完全静默。
 
-`h5_open` 报四个阶段（定位二进制 → 启动宿主 → 等待页面 → ready）；`android_open` 报"读库"和"引擎就绪"。
+`h5_open` 报四个阶段（定位二进制 → 启动宿主 → 等待页面 → ready）；`android_open` 与 `ios_open` 报"引擎启动"和"就绪"。
 
 `notifications/cancelled` 会真的中断在跑的调用：`android_call` 在 `pool.Do` 里停下，`h5_eval` 停止等待。
 
