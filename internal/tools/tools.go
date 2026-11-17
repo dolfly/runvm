@@ -79,11 +79,14 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Name: "ios_open",
 		Description: "Load an iOS/Darwin dylib (Mach-O, arm64) into a golem emulator and return a session id. " +
 			"No Java runtime, no JNI, no bionic sysroot: the Darwin personality is chosen from the file's " +
-			"magic. Only symbols the dylib defines itself resolve — anything it imports from libSystem, " +
-			"Foundation or Objective-C (malloc, memcpy, objc_msgSend, ...) has no implementation here and " +
-			"a call to it returns 0. ios_symbols/ios_imports tell you which is which before you call.",
+			"magic. Only symbols the dylib defines itself resolve. An imported name (libSystem, Foundation, " +
+			"Objective-C) has no implementation here: calling it directly fails with 'imported but has no " +
+			"implementation', while a call the dylib makes to it internally gets golem's optimistic stub, " +
+			"which answers 0. ios_symbols and ios_imports list both sides before you call.",
 		InputSchema: object(map[string]any{
-			"dylib":    str("Path to the Mach-O arm64 dylib on this machine"),
+			"dylib": str("Path to the Mach-O arm64 dylib on this machine. It must use non-lazy binds " +
+				"(clang -Wl,-bind_at_load): the default lazy-bind form is refused, because runvm does not " +
+				"emulate dyld's stub binder"),
 			"engine":   str(`CPU backend: "unicorn" or empty for the default`),
 			"pool":     num("Engines to warm, 1-16 (default 1). Above 1, calls run in parallel on separate engines"),
 			"max_uses": num("Recycle an engine after this many calls (default 0: never)"),
@@ -94,8 +97,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	srv.Add(mcp.Tool{
 		Name: "ios_symbols",
 		Description: "List the symbols an iOS dylib exports and imports. Exports are callable with ios_call; " +
-			"imports are the ones libSystem/ObjC would have to provide, and none of them work. Reads the " +
-			"Mach-O symbol table directly, so it also works before a session is open.",
+			"imports are the names libSystem/ObjC would have to provide, and none of them work (see " +
+			"ios_imports). Reads the Mach-O symbol table and its bind streams directly, so it also works " +
+			"before a session is open.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 			"filter":  str("Case-insensitive substring filter on the symbol name"),
@@ -107,8 +111,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	srv.Add(mcp.Tool{
 		Name: "ios_imports",
 		Description: "List the symbols an iOS dylib imports — what libSystem, Foundation or Objective-C would " +
-			"have to provide for the library to be fully functional. runvm supplies none of them, so a call " +
-			"that touches one returns 0. Use this to explain a result that looks wrong.",
+			"have to provide for the library to be fully functional. runvm supplies none of them: calling one " +
+			"of these names directly returns an error, and a call the dylib makes to one internally gets " +
+			"golem's optimistic stub (0). Use this to explain a result that looks wrong.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 		}, "session"),
@@ -119,8 +124,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Name: "ios_call",
 		Description: "Call an exported symbol of an iOS dylib and return its value. Arguments are integers, " +
 			"strings (char*) or {\"buffer\": n} for an out-parameter read back after the call. Up to 8. " +
-			"A symbol the dylib imports but cannot resolve reports that explicitly instead of returning a " +
-			"number; nothing here provides libc or Objective-C implementations.",
+			"Calling an imported name reports that explicitly instead of returning a number. If the function " +
+			"is defined in the dylib but calls an unimplemented import itself, that import answers 0 — " +
+			"golem's optimistic stub, not an error; ios_imports lists what is missing.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 			"symbol":  str("Exported function name, without the leading underscore"),
@@ -756,11 +762,17 @@ func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 	mcp.Notify(ctx, 50, "booting the Darwin personality: no bionic sysroot, no JNI")
 	sess, err := ios.Open(a.path(), ios.OpenOptions{Engine: a.Engine, Pool: a.Pool, MaxUses: a.MaxUses})
 	if err != nil {
+		// golem refuses lazy/weak bind streams outright. The build flag that
+		// avoids them is not obvious from the error alone, so say it here.
+		if strings.Contains(err.Error(), "lazy/weak bind") {
+			return nil, fmt.Errorf("%w (build the dylib with -Wl,-bind_at_load)", err)
+		}
 		return nil, err
 	}
 	sessID := s.IOS.Add(sess)
 	exports, _ := ios.Exports(a.path())
 	imports, _ := ios.Imports(a.path())
+	libs, _ := ios.Libraries(a.path())
 	mcp.Notify(ctx, 90, "ready: call ios_call")
 
 	// The shape is the iOS one whatever door was used; android_open's caller
@@ -774,7 +786,7 @@ func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 		"imports":         imports,
 		"jni_on_load":     nil,
 		"init_array":      nil,
-		"system_libs":     []string{},
+		"system_libs":     libs,
 		"engine":          sess.Engine(),
 		"pool_size":       sess.PoolSize(),
 		"engines_created": sess.EnginesCreated(),
@@ -849,11 +861,14 @@ func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	libs, _ := ios.Libraries(sess.Path())
 	return map[string]any{
-		"session": a.Session,
-		"imports": imports,
-		"count":   len(imports),
-		"note":    "none of these have an implementation; calling one returns 0",
+		"session":     a.Session,
+		"imports":     imports,
+		"count":       len(imports),
+		"system_libs": libs,
+		"note": "none of these have an implementation: calling one directly errors, and a call " +
+			"the dylib makes to one internally gets golem's stub value 0",
 	}, nil
 }
 
