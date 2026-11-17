@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -207,5 +209,84 @@ func TestIOSToolsUseIOSSessionStore(t *testing.T) {
 	limited.IOS.Add(nil)
 	if err := limited.reserved(); err == nil {
 		t.Error("an ios session must count against RUNVM_MAX_SESSIONS")
+	}
+}
+
+// brokenBindStream returns probe bytes whose LC_DYLD_INFO(_ONLY) bind stream
+// points past the end of the file. It is the same shape as the case in
+// internal/ios: a file that parses, boots, and whose import table cannot be
+// read.
+func brokenBindStream(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	const lcDyldInfoOnly = 0x8000_0022
+	out := append([]byte(nil), raw...)
+	ncmds := binary.LittleEndian.Uint32(out[16:])
+	off := uint32(32)
+	for i := uint32(0); i < ncmds; i++ {
+		if int(off)+8 > len(out) {
+			break
+		}
+		cmd := binary.LittleEndian.Uint32(out[off:])
+		size := binary.LittleEndian.Uint32(out[off+4:])
+		if cmd == lcDyldInfoOnly {
+			binary.LittleEndian.PutUint32(out[off+16:], 0x00ff_ff00) // bind_off
+			return out
+		}
+		off += size
+	}
+	t.Fatalf("probe has no LC_DYLD_INFO_ONLY")
+	return nil
+}
+
+// TestIOSSymbolsReportsImportErrors pins the response shape, not just the
+// error: ios_symbols used to drop the parse error and return "imports": null,
+// which reads like a dylib with no imports. The file is broken after the
+// session opens, because golem refuses a dylib whose bind stream is out of
+// bounds — a file it will not boot never reaches the tool at all.
+func TestIOSSymbolsReportsImportErrors(t *testing.T) {
+	path, cleanup, err := iosprobe.Write()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	srv, _ := New("test", Limits{})
+	open := rpcCall(t, srv, "ios_open", map[string]any{"dylib": path})
+	if open.Result.IsError {
+		skipWithoutEngine(t, open.text(t))
+		t.Fatalf("ios_open: %s", open.text(t))
+	}
+	var opened map[string]any
+	if err := json.Unmarshal([]byte(open.text(t)), &opened); err != nil {
+		t.Fatalf("open result is not JSON: %v\n%s", err, open.text(t))
+	}
+	id, _ := opened["session"].(string)
+	if id == "" {
+		t.Fatalf("open result has no session: %v", opened)
+	}
+
+	if err := os.WriteFile(path, brokenBindStream(t, iosprobe.Fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	syms := rpcCall(t, srv, "ios_symbols", map[string]any{"session": id})
+	if syms.Result.IsError {
+		t.Fatalf("ios_symbols: %s", syms.text(t))
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(syms.text(t)), &out); err != nil {
+		t.Fatalf("ios_symbols result is not JSON: %v\n%s", err, syms.text(t))
+	}
+	msg, _ := out["imports_error"].(string)
+	if msg == "" {
+		t.Errorf("imports_error is missing: the caller cannot tell a broken import table from an empty one\n%s", syms.text(t))
+	}
+	if !strings.Contains(msg, "bind stream") {
+		t.Errorf("imports_error = %q, want the stream that could not be read", msg)
+	}
+	// The exports half is unaffected: the failure is scoped to the read it
+	// belongs to, and the rest of the answer is still usable.
+	if exports, _ := out["exports"].([]any); len(exports) == 0 {
+		t.Errorf("exports = %v, want the intact export list", out["exports"])
 	}
 }

@@ -96,10 +96,11 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 
 	srv.Add(mcp.Tool{
 		Name: "ios_symbols",
-		Description: "List the symbols an iOS dylib exports and imports. Exports are callable with ios_call; " +
-			"imports are the names libSystem/ObjC would have to provide, and none of them work (see " +
-			"ios_imports). Reads the Mach-O symbol table and its bind streams directly, so it also works " +
-			"before a session is open.",
+		Description: "List the symbols an iOS dylib exports and imports. Exports are callable with ios_call. " +
+			"Imports are the names libSystem/ObjC would have to provide: calling one directly reports " +
+			"'imported but has no implementation', while a call the dylib makes to one internally gets " +
+			"golem's optimistic stub (0). Both lists are read from the file on disk, so this still needs a " +
+			"session id.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 			"filter":  str("Case-insensitive substring filter on the symbol name"),
@@ -770,9 +771,12 @@ func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	sessID := s.IOS.Add(sess)
-	exports, _ := ios.Exports(a.path())
-	imports, _ := ios.Imports(a.path())
-	libs, _ := ios.Libraries(a.path())
+	// A parse failure must not be indistinguishable from "this dylib has none".
+	// The session booted either way, so the errors are reported as fields and
+	// the rest of the result is still usable.
+	exports, exportsErr := ios.Exports(a.path())
+	imports, importsErr := ios.Imports(a.path())
+	libs, libsErr := ios.Libraries(a.path())
 	mcp.Notify(ctx, 90, "ready: call ios_call")
 
 	// The shape is the iOS one whatever door was used; android_open's caller
@@ -804,7 +808,36 @@ func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 		out["routed_to"] = "ios"
 		out["note"] = "Mach-O input: opened with ios_open semantics (no JNI, no bionic); use ios_* tools"
 	}
+	addErrors(out, map[string]error{
+		"exports_error":     exportsErr,
+		"imports_error":     importsErr,
+		"system_libs_error": libsErr,
+	})
+	// A failed read must not render as null: the lists stay empty and the
+	// matching *_error field says which one could not be read.
+	out["exports"] = emptyIfNil(exports)
+	out["imports"] = emptyIfNil(imports)
+	out["system_libs"] = emptyIfNil(libs)
 	return out, nil
+}
+
+// addErrors puts the non-nil ones into out. Fields are omitted rather than set
+// to null so a reader can tell "read, and there were none" from "not read".
+func addErrors(out map[string]any, errs map[string]error) {
+	for field, err := range errs {
+		if err != nil {
+			out[field] = err.Error()
+		}
+	}
+}
+
+// emptyIfNil renders an unread list as [] rather than null, so the field keeps
+// its type whether or not the read succeeded.
+func emptyIfNil(names []string) []string {
+	if names == nil {
+		return []string{}
+	}
+	return names
 }
 
 func (s *Set) iosSymbols(_ context.Context, raw json.RawMessage) (any, error) {
@@ -835,15 +868,17 @@ func (s *Set) iosSymbols(_ context.Context, raw json.RawMessage) (any, error) {
 		shown = shown[:a.Limit]
 		truncated = true
 	}
-	imports, _ := ios.Imports(path)
-	return map[string]any{
+	imports, impErr := ios.Imports(path)
+	out := map[string]any{
 		"session":   a.Session,
 		"exports":   shown,
 		"matched":   len(names),
 		"total":     len(all),
 		"truncated": truncated,
-		"imports":   imports,
-	}, nil
+		"imports":   emptyIfNil(imports),
+	}
+	addErrors(out, map[string]error{"imports_error": impErr})
+	return out, nil
 }
 
 func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
@@ -861,15 +896,17 @@ func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	libs, _ := ios.Libraries(sess.Path())
-	return map[string]any{
+	libs, libsErr := ios.Libraries(sess.Path())
+	out := map[string]any{
 		"session":     a.Session,
 		"imports":     imports,
 		"count":       len(imports),
 		"system_libs": libs,
 		"note": "none of these have an implementation: calling one directly errors, and a call " +
 			"the dylib makes to one internally gets golem's stub value 0",
-	}, nil
+	}
+	addErrors(out, map[string]error{"system_libs_error": libsErr})
+	return out, nil
 }
 
 func (s *Set) iosCall(ctx context.Context, raw json.RawMessage) (any, error) {

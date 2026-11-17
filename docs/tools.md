@@ -38,7 +38,7 @@ layout: page
 | 工具 | 关键参数 | 作用 |
 |---|---|---|
 | `ios_open` | `dylib`、`engine`、`pool`、`max_uses` | 加载 Mach-O arm64 dylib，跑 init，返回会话（含 `system_libs`：`LC_LOAD_DYLIB` 声明的依赖） |
-| `ios_symbols` | `session`、`filter`、`limit` | 列导出符号与导入符号（直接读 Mach-O，不依赖会话能否启动） |
+| `ios_symbols` | `session`、`filter`、`limit` | 列导出符号与导入符号（读磁盘上的 Mach-O，但仍要会话 id 定位文件） |
 | `ios_imports` | `session` | 列 dylib 需要的外部符号 + 声明的依赖库——这些都没有实现 |
 | `ios_call` | `session`、`symbol`、`args` | 调导出函数 |
 | `ios_close` | `session` | 释放 ios 会话 |
@@ -46,6 +46,8 @@ layout: page
 `ios_call` 的 `args` 与 `android_call` 相同：整数、字符串（`char*`）、`{"buffer": n}`，最多 8 个。符号名**不带前导下划线**（Mach-O 的 `_add` 在这里是 `add`）。
 
 **导入名是怎么读出来的**：`LC_SYMTAB` 的未定义符号表是 `nm` 的视图，不是 loader 的——dyld 实际按 `LC_DYLD_INFO` 的 bind 流或 `LC_DYLD_CHAINED_FIXUPS` 的导入表绑定，那里的符号串还可能是 zlib 压缩的。两张表通常一致，但符号表缺失或只写了一半时，只读它会把“不缺”当结论，调用方对着 `not found` 以为是自己拼错了符号名。所以两处都读，和 golem 自己解析的来源对齐。`system_libs` 则是 `LC_LOAD_DYLIB` 的字面声明，所以它总该是 `/usr/lib/libSystem.B.dylib` 这样的真实路径，而不是从符号名反推的猜测。
+
+**读不出来要说读不出来**：导入表解析失败时，`ios_open` / `ios_symbols` 会带上 `imports_error`（依赖库同理是 `system_libs_error`），而不是把它当成「这个 dylib 没有导入」——空的 `imports: []` 和读失败的 `imports: []` 在返回里必须是两回事。
 
 **边界，写在这里而不是藏在错误里**：只有 dylib 自己定义的符号可调用。它从 libSystem / Foundation / Objective-C 导入的东西（`malloc`、`memcpy`、`objc_msgSend` …）既没有 guest 实现，也注册不了宿主桩——golem 的 Darwin `ReplaceFns` 还在 `internal` 里——所以要分两种情形：
 

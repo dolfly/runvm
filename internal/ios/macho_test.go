@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dolfly/runvm/internal/ios/iosprobe"
@@ -203,5 +204,70 @@ func TestImportsRejectsNonMachO(t *testing.T) {
 	}
 	if _, err := Libraries(elf); err == nil {
 		t.Error("Libraries on an ELF must fail")
+	}
+}
+
+// patchBindOffset returns the fixture with its LC_DYLD_INFO(_ONLY) bind stream
+// pointing past the end of the file. The bind stream is the fixture's only
+// import source besides LC_SYMTAB, so a file like this is exactly where
+// "the stream could not be read" must not come back as "the dylib imports
+// nothing".
+func patchBindOffset(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	const lcDyldInfoOnly = 0x8000_0022
+	out := append([]byte(nil), raw...)
+	if len(out) < 32 {
+		t.Fatalf("fixture is %d bytes, too short to hold a load command table", len(out))
+	}
+	ncmds := binary.LittleEndian.Uint32(out[16:])
+	off := uint32(32)
+	for i := uint32(0); i < ncmds; i++ {
+		if int(off)+8 > len(out) {
+			break
+		}
+		cmd := binary.LittleEndian.Uint32(out[off:])
+		size := binary.LittleEndian.Uint32(out[off+4:])
+		if cmd == lcDyldInfoOnly {
+			if size < 24 {
+				t.Fatalf("LC_DYLD_INFO_ONLY claims %d bytes, too short to patch", size)
+			}
+			binary.LittleEndian.PutUint32(out[off+16:], 0x00ff_ff00) // bind_off
+			return out
+		}
+		off += size
+	}
+	t.Fatalf("fixture has no LC_DYLD_INFO_ONLY; the probe is built with -Wl,-bind_at_load")
+	return nil
+}
+
+// TestImportsReportsUnreadableBindStream is the regression for the silent
+// answer: on the previous code a bind stream pointing outside the file was
+// skipped, and the caller got imports: [] — the same shape as a dylib that
+// genuinely imports nothing. The reader must say it could not read the table.
+func TestImportsReportsUnreadableBindStream(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "broken.dylib")
+	if err := os.WriteFile(broken, patchBindOffset(t, iosprobe.Fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Imports(broken); err == nil {
+		t.Error("Imports on a dylib whose bind stream is past EOF must fail, not report no imports")
+	} else if !strings.Contains(err.Error(), "bind stream") {
+		t.Errorf("error = %v, want it to name the bind stream that could not be read", err)
+	}
+
+	// The same file must still parse when the stream is intact: the failure
+	// above is about the read, not about the format.
+	good := filepath.Join(dir, "good.dylib")
+	if err := os.WriteFile(good, iosprobe.Fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imports, err := Imports(good)
+	if err != nil {
+		t.Fatalf("imports on the intact fixture: %v", err)
+	}
+	if !slices.Contains(imports, iosprobe.FixtureImport) {
+		t.Errorf("imports = %v, want %s", imports, iosprobe.FixtureImport)
 	}
 }

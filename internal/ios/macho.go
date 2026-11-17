@@ -100,13 +100,23 @@ func readImageMeta(path string) (imageMeta, error) {
 				bo := binary.LittleEndian
 				// dyld_info_command: ten uint32 pairs from offset 8; the bind
 				// streams sit at 16..40.
-				for _, s := range [...][2]uint32{
-					{bo.Uint32(lc[16:]), bo.Uint32(lc[20:])}, // bind
-					{bo.Uint32(lc[24:]), bo.Uint32(lc[28:])}, // weak bind
-					{bo.Uint32(lc[32:]), bo.Uint32(lc[36:])}, // lazy bind
+				for _, s := range [...]struct {
+					name      string
+					off, size uint32
+				}{
+					{"bind", bo.Uint32(lc[16:]), bo.Uint32(lc[20:])},
+					{"weak bind", bo.Uint32(lc[24:]), bo.Uint32(lc[28:])},
+					{"lazy bind", bo.Uint32(lc[32:]), bo.Uint32(lc[36:])},
 				} {
-					raw, err := readAt(fh, s[0], s[1])
-					if err != nil || len(raw) == 0 {
+					// A stream the file claims but cannot be read is a failure,
+					// not an empty stream. Answering "no imports" for it is the
+					// ambiguity this file exists to remove: the caller cannot tell
+					// a self-contained dylib from one whose import table is broken.
+					raw, err := readAt(fh, s.off, s.size)
+					if err != nil {
+						return imageMeta{}, fmt.Errorf("read %s stream at %#x: %w", s.name, s.off, err)
+					}
+					if len(raw) == 0 {
 						continue
 					}
 					for _, name := range bindOpcodes(raw) {
@@ -119,7 +129,7 @@ func readImageMeta(path string) (imageMeta, error) {
 				}
 				raw, err := readAt(fh, binary.LittleEndian.Uint32(lc[8:]), binary.LittleEndian.Uint32(lc[12:]))
 				if err != nil {
-					continue
+					return imageMeta{}, fmt.Errorf("read chained fixups at %#x: %w", binary.LittleEndian.Uint32(lc[8:]), err)
 				}
 				for _, name := range chainedImports(raw) {
 					add(name)
@@ -132,13 +142,21 @@ func readImageMeta(path string) (imageMeta, error) {
 	return m, nil
 }
 
+// readAt reads size bytes at off. A short read is an error rather than a
+// truncated buffer: the caller walks a script whose bytes have to be there, and
+// a silent prefix would invent or miss imports depending on where the file
+// happened to end.
 func readAt(f *os.File, off, size uint32) ([]byte, error) {
 	if size == 0 {
 		return nil, nil
 	}
 	buf := make([]byte, size)
-	if _, err := f.ReadAt(buf, int64(off)); err != nil && err != io.EOF {
+	n, err := f.ReadAt(buf, int64(off))
+	if err != nil && err != io.EOF {
 		return nil, err
+	}
+	if n != len(buf) {
+		return nil, fmt.Errorf("%d of %d bytes available: %w", n, len(buf), io.ErrUnexpectedEOF)
 	}
 	return buf, nil
 }

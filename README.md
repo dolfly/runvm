@@ -139,7 +139,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `android_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `android_close` | 释放 emulator |
 | `ios_open` | 加载 Mach-O arm64 dylib,返回 `ios-N`(无 JNI、无 bionic) |
-| `ios_symbols` | 列出导出与导入符号(直接读 Mach-O,不依赖会话能否启动) |
+| `ios_symbols` | 列出导出与导入符号(读磁盘上的 Mach-O,但仍要一个 ios 会话 id 来定位文件) |
 | `ios_imports` | 列出 dylib 需要的外部符号与依赖库——这些没有实现 |
 | `ios_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `ios_close` | 释放 ios 会话 |
@@ -249,6 +249,7 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
 - **PDF:macOS 是矢量的**。`h5_pdf` 先让页面自己打印(WKWebView `createPDFWithConfiguration:`,由 `dolfly/glaze` v0.4.0 的 `PrintPDF()` 与 `dolfly/webframe-fork` v0.3.0 的 `Frame.PrintPDF()` 承载):文本还是文本、滚动内容的整页都在、而且不需要 `visible`。Linux/Windows 仍是"截图 + 嵌入"的栅格 PDF。返回值里的 `vector` 字段说明这一次拿到的是哪一种,工具描述也不再自称矢量。
 - **平台覆盖到"能启动",没到"全功能"**。CI 在 macOS(arm64)与 Windows(amd64)上跑 build + 单测 + `doctor`,`doctor` 会真的启动 WKWebView / WebView2 并加载一个页面(macOS 3.6s、Windows 8.4s 就绪),bionic 也都在 20ms 内启动。**截图三平台都有,PDF 的矢量版本只有 macOS**:Linux/Windows 的栅格 PDF 依赖抓屏,所以要 `visible: true`。
 - **iOS 只到"纯计算"**。Mach-O arm64 的 dylib 能加载、能调自己定义的导出函数(`add`、`via_fptr_table`、直接 `svc #0x80` 的 Darwin 系统调用都实测通过),但 libSystem / Foundation / Objective-C 那一层没有:外部模块注册不了 Darwin 的宿主桩。直接调这类导入符号会明确报「imported but has no implementation」,而库内部调它会拿到 golem 的乐观 0——包了 `strlen` 的函数返回 0,而不是长度。等 golem 把 Darwin 的 `ReplaceFns` 开出门面(`ios_hook` 的第二阶段)之前,这个边界不会变。工具描述里写明了这一点,因为"函数返回 0"看起来很像"函数就是返回 0"。
+- **iOS 的 dylib 必须用非 lazy bind 链接**。默认 `clang -arch arm64 -dynamiclib` 出的是 lazy bind,golem 直接拒:`carries lazy/weak bind streams (unsupported)`,因为它不模拟 dyld 的 stub binder。加 `-Wl,-bind_at_load`(非 lazy bind)或 `-Wl,-fixup_chains`(chained fixups)即可,`ios_open` 的报错里也带这句提示。
 - **`go.mod` 里有一条 `replace`**。webframe 把 glaze 钉在作者的 fork 上,而 Go 会忽略依赖里的 `replace`,所以本模块必须重复一遍;升级 webframe 时这里要跟着改。
 
 ## 开发
