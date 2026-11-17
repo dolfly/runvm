@@ -21,7 +21,7 @@ make test         # 单元测试；不启动 emulator、不启动浏览器
 make vet
 make fmt          # gofmt -w .
 make fmt-check    # CI 用的检查
-make doctor       # 真的启动各后端探活
+make doctor       # 真的启动各后端探活（单独构建，不带 -trimpath：golem 靠二进制里的模块路径找 bionic 资产）
 go run ./cmd/runvm selftest   # 平台冒烟：开页面、截图、确认不是白屏、导出 PDF
 ./scripts/e2e.py  # 完整 e2e（Linux + WebKitGTK + Xvfb + 一个真实 .so）
 ```
