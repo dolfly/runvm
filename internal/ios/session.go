@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -105,7 +106,8 @@ func Open(path string, opts OpenOptions) (*Session, error) {
 		func(emu *emulator.Emulator) { _ = emu.Close() },
 	)
 	if err != nil {
-		return nil, fmt.Errorf("ios_open: %s: %w (run `runvm doctor` if this mentions the engine or libunicorn)", path, err)
+		return nil, fmt.Errorf("ios_open: %s: %w (run `runvm doctor` if this mentions the engine or libunicorn)%s",
+			path, err, linkHint(err))
 	}
 	s.pool = pool
 	s.touch()
@@ -212,38 +214,6 @@ func Exports(path string) ([]string, error) {
 		}
 		seen[name] = struct{}{}
 		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-// Imports lists the symbols the dylib needs from outside itself, with the same
-// leading-underscore trimming golem applies. Anything here is a candidate for
-// "has no implementation": runvm cannot supply libSystem or Objective-C
-// symbols, so a non-empty list is the honest explanation for a call that
-// returns a surprising 0.
-func Imports(path string) ([]string, error) {
-	f, err := macho.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("read imports: %w", err)
-	}
-	defer f.Close()
-	ims, err := f.ImportedSymbols()
-	if err != nil {
-		return nil, fmt.Errorf("read imported symbols: %w", err)
-	}
-	seen := map[string]struct{}{}
-	names := make([]string, 0, len(ims))
-	for _, name := range ims {
-		n := strings.TrimPrefix(name, "_")
-		if n == "" {
-			continue
-		}
-		if _, dup := seen[n]; dup {
-			continue
-		}
-		seen[n] = struct{}{}
-		names = append(names, n)
 	}
 	sort.Strings(names)
 	return names, nil
@@ -378,9 +348,10 @@ func (s *Session) Call(ctx context.Context, symbol string, args []Arg) (Result, 
 			// A name the image imports but nothing defines is the expected
 			// libSystem case, and "symbol not found" alone reads like a typo.
 			if strings.Contains(err.Error(), "not found") {
-				if imports, ierr := Imports(s.path); ierr == nil && contains(imports, symbol) {
+				if imports, ierr := Imports(s.path); ierr == nil && slices.Contains(imports, symbol) {
 					return fmt.Errorf("ios_call: %s is imported by the dylib but has no implementation "+
-						"(libSystem/ObjC symbols are not provided; see the tool description)", symbol)
+						"(runvm supplies no libSystem/ObjC symbols; the dylib's own calls to it "+
+						"read a stub that returns 0, which is why they look like they work)", symbol)
 				}
 			}
 			return fmt.Errorf("ios_call: %s: %w", symbol, err)
@@ -399,15 +370,6 @@ func (s *Session) Call(ctx context.Context, symbol string, args []Arg) (Result, 
 		return Result{}, err
 	}
 	return res, nil
-}
-
-func contains(names []string, want string) bool {
-	for _, n := range names {
-		if n == want {
-			return true
-		}
-	}
-	return false
 }
 
 func hexBytes(b []byte) string {

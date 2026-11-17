@@ -765,7 +765,10 @@ func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	sessID := s.IOS.Add(sess)
 	exports, _ := ios.Exports(a.path())
-	imports, _ := ios.Imports(a.path())
+	// Imports and system libraries describe the file, not the engine: a parse
+	// failure must not take down a session that booted, so it is reported as a
+	// field instead of an error.
+	deps, depErr := ios.ReadDependencies(a.path())
 	mcp.Notify(ctx, 90, "ready: call ios_call")
 
 	// The shape is the iOS one whatever door was used; android_open's caller
@@ -776,13 +779,16 @@ func (s *Set) iosOpen(ctx context.Context, raw json.RawMessage) (any, error) {
 		"kind":            "macho-dylib",
 		"assets_present":  false,
 		"symbols":         len(exports),
-		"imports":         imports,
+		"imports":         deps.Imports,
 		"jni_on_load":     nil,
 		"init_array":      nil,
-		"system_libs":     []string{},
+		"system_libs":     deps.SystemLibs,
 		"engine":          sess.Engine(),
 		"pool_size":       sess.PoolSize(),
 		"engines_created": sess.EnginesCreated(),
+	}
+	if depErr != nil {
+		out["imports_error"] = depErr.Error()
 	}
 	if len(exports) > 50 {
 		out["exports"] = exports[:50]
@@ -828,15 +834,19 @@ func (s *Set) iosSymbols(_ context.Context, raw json.RawMessage) (any, error) {
 		shown = shown[:a.Limit]
 		truncated = true
 	}
-	imports, _ := ios.Imports(path)
-	return map[string]any{
+	imports, impErr := ios.Imports(path)
+	out := map[string]any{
 		"session":   a.Session,
 		"exports":   shown,
 		"matched":   len(names),
 		"total":     len(all),
 		"truncated": truncated,
 		"imports":   imports,
-	}, nil
+	}
+	if impErr != nil {
+		out["imports_error"] = impErr.Error()
+	}
+	return out, nil
 }
 
 func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
@@ -850,14 +860,15 @@ func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	imports, err := ios.Imports(sess.Path())
+	deps, err := ios.ReadDependencies(sess.Path())
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"session": a.Session,
-		"imports": imports,
-		"count":   len(imports),
+		"session":     a.Session,
+		"imports":     deps.Imports,
+		"count":       len(deps.Imports),
+		"system_libs": deps.SystemLibs,
 		"note": "runvm provides none of these: a direct ios_call of one fails with an " +
 			"explicit error, while an indirect call from inside the dylib reads a stub that returns 0",
 	}, nil

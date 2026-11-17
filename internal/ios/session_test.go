@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,17 +149,61 @@ func TestCallAdd(t *testing.T) {
 	}
 }
 
-// TestImportsAreReported proves the honest failure mode: a dylib's imports are
-// listed, and calling one does not silently look like a working function.
+// TestImportsAreReported is the honest half of the contract, on a dylib that
+// actually calls libSystem. The previous version only asserted that the slice
+// was non-nil, which a fixture importing nothing satisfied — so the test
+// could not fail whatever the import table said.
 func TestImportsAreReported(t *testing.T) {
 	imports, err := Imports(probePath(t))
 	if err != nil {
 		t.Fatalf("imports: %v", err)
 	}
-	// The fixture defines add and imports nothing beyond the runtime's own
-	// dyld stubs, so the meaningful assertion is that the call succeeds.
-	if imports == nil {
-		t.Error("imports must be a slice, never nil")
+	if len(imports) == 0 {
+		t.Fatalf("the probe imports nothing: it is supposed to call %s", iosprobe.SystemLib)
+	}
+	for _, want := range iosprobe.LibcImports {
+		if !slices.Contains(imports, want) {
+			t.Errorf("imports = %v, missing %q", imports, want)
+		}
+	}
+}
+
+// TestCallImportedSymbolIsExplicit pins the split the documentation promises:
+// calling an imported symbol directly is an error that says so, while the same
+// call made from inside the dylib is not an error at all — it reads golem's
+// optimistic stub, which returns 0. Needs a CPU engine, so it skips without
+// one.
+func TestCallImportedSymbolIsExplicit(t *testing.T) {
+	if !engineAvailable(t) {
+		t.Skip("no CPU engine: build with -tags unicorn and point GOLEM_UNICORN at libunicorn")
+	}
+	sess, err := Open(probePath(t), OpenOptions{Pool: 1})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	ctx := context.Background()
+	if _, err := sess.Call(ctx, "malloc", nil); err == nil {
+		t.Fatal("calling an imported symbol must fail, not return 0")
+	} else if !strings.Contains(err.Error(), "imported by the dylib") {
+		t.Errorf("error = %q, want it to name the symbol as imported", err)
+	}
+
+	// The same call from inside the dylib is the documented optimistic path:
+	// golem binds the import to a stub that returns 0, and runvm does not turn
+	// that into an error.
+	res, err := sess.Call(ctx, "slen", []Arg{{Kind: ArgString, Str: "hello"}})
+	if err != nil {
+		t.Fatalf("slen: %v", err)
+	}
+	if res.Value != 0 {
+		t.Errorf("slen = %d, want 0 from golem's stub", res.Value)
+	}
+	if res, err := sess.Call(ctx, "via_malloc", []Arg{{Kind: ArgWord, Word: 5}}); err != nil {
+		t.Fatalf("via_malloc: %v", err)
+	} else if res.Value != 5 {
+		t.Errorf("via_malloc(5) = %d, want 5", res.Value)
 	}
 }
 
