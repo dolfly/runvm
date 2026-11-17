@@ -79,9 +79,11 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Name: "ios_open",
 		Description: "Load an iOS/Darwin dylib (Mach-O, arm64) into a golem emulator and return a session id. " +
 			"No Java runtime, no JNI, no bionic sysroot: the Darwin personality is chosen from the file's " +
-			"magic. Only symbols the dylib defines itself resolve — anything it imports from libSystem, " +
-			"Foundation or Objective-C (malloc, memcpy, objc_msgSend, ...) has no implementation here and " +
-			"a call to it returns 0. ios_symbols/ios_imports tell you which is which before you call.",
+			"magic. Only symbols the dylib defines itself resolve. What it imports from libSystem, " +
+			"Foundation or Objective-C (malloc, memcpy, objc_msgSend, ...) has no implementation here: " +
+			"calling one directly is an error, and the same call made inside the dylib is not — the " +
+			"import reads a stub that returns 0. ios_imports lists the imported names and " +
+			"system_libs the libraries the image links against.",
 		InputSchema: object(map[string]any{
 			"dylib":    str("Path to the Mach-O arm64 dylib on this machine"),
 			"engine":   str(`CPU backend: "unicorn" or empty for the default`),
@@ -94,8 +96,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	srv.Add(mcp.Tool{
 		Name: "ios_symbols",
 		Description: "List the symbols an iOS dylib exports and imports. Exports are callable with ios_call; " +
-			"imports are the ones libSystem/ObjC would have to provide, and none of them work. Reads the " +
-			"Mach-O symbol table directly, so it also works before a session is open.",
+			"imports are what libSystem/ObjC would have to provide, and calling one directly is an error. " +
+			"The file is read from disk rather than from a booted engine, but a session id is still " +
+			"required to name it.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 			"filter":  str("Case-insensitive substring filter on the symbol name"),
@@ -107,8 +110,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	srv.Add(mcp.Tool{
 		Name: "ios_imports",
 		Description: "List the symbols an iOS dylib imports — what libSystem, Foundation or Objective-C would " +
-			"have to provide for the library to be fully functional. runvm supplies none of them, so a call " +
-			"that touches one returns 0. Use this to explain a result that looks wrong.",
+			"have to provide for the library to be fully functional, plus the libraries it links against. " +
+			"runvm supplies none of them: calling one directly is an error, and an indirect call from " +
+			"inside the dylib reads a stub that returns 0. Use this to explain a result that looks wrong.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 		}, "session"),
@@ -119,8 +123,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Name: "ios_call",
 		Description: "Call an exported symbol of an iOS dylib and return its value. Arguments are integers, " +
 			"strings (char*) or {\"buffer\": n} for an out-parameter read back after the call. Up to 8. " +
-			"A symbol the dylib imports but cannot resolve reports that explicitly instead of returning a " +
-			"number; nothing here provides libc or Objective-C implementations.",
+			"Calling a symbol the dylib imports (malloc, objc_msgSend, ...) reports that explicitly instead " +
+			"of returning a number; nothing here provides libc or Objective-C implementations. A call from " +
+			"inside the dylib to one of them is not an error — the import reads a stub that returns 0.",
 		InputSchema: object(map[string]any{
 			"session": str("Session id from ios_open"),
 			"symbol":  str("Exported function name, without the leading underscore"),
@@ -853,7 +858,8 @@ func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
 		"session": a.Session,
 		"imports": imports,
 		"count":   len(imports),
-		"note":    "none of these have an implementation; calling one returns 0",
+		"note": "runvm provides none of these: a direct ios_call of one fails with an " +
+			"explicit error, while an indirect call from inside the dylib reads a stub that returns 0",
 	}, nil
 }
 

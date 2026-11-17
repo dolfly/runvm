@@ -38,14 +38,21 @@ layout: page
 | 工具 | 关键参数 | 作用 |
 |---|---|---|
 | `ios_open` | `dylib`、`engine`、`pool`、`max_uses` | 加载 Mach-O arm64 dylib，跑 init，返回会话 |
-| `ios_symbols` | `session`、`filter`、`limit` | 列导出符号（直接读 Mach-O，不依赖会话能否启动） |
-| `ios_imports` | `session` | 列 dylib 需要的外部符号——这些没有实现 |
+| `ios_symbols` | `session`、`filter`、`limit` | 列导出与导入符号（文件从磁盘读，不需要引擎；仍要一个 ios 会话 id 来定位文件） |
+| `ios_imports` | `session` | 列 dylib 需要的外部符号和链接的系统库 |
 | `ios_call` | `session`、`symbol`、`args` | 调导出函数 |
 | `ios_close` | `session` | 释放 ios 会话 |
 
 `ios_call` 的 `args` 与 `android_call` 相同：整数、字符串（`char*`）、`{"buffer": n}`，最多 8 个。符号名**不带前导下划线**（Mach-O 的 `_add` 在这里是 `add`）。
 
-**边界，写在这里而不是藏在错误里**：只有 dylib 自己定义的符号可调用。它从 libSystem / Foundation / Objective-C 导入的东西（`malloc`、`memcpy`、`objc_msgSend` …）既没有 guest 实现，也注册不了宿主桩——golem 的 Darwin `ReplaceFns` 还在 `internal` 里——所以调到这些符号时 golem 返回乐观的 0，不报错。`ios_imports` 和 `ios_symbols` 的 `imports` 字段就是用来在调用前把这类符号认出来的。这条边界是第二阶段的入口（`ios_hook`），第一阶段不做。
+**边界，写在这里而不是藏在错误里**：只有 dylib 自己定义的符号可调用。它从 libSystem / Foundation / Objective-C 导入的东西（`malloc`、`memcpy`、`objc_msgSend` …）既没有 guest 实现，也注册不了宿主桩——golem 的 Darwin `ReplaceFns` 还在 `internal` 里。所以两种调用必须分开看：
+
+- **直接 `ios_call` 一个导入符号**：报错，并且说明它是导入的、没有实现。不会返回 0。
+- **dylib 内部间接调用**：不报错，读到的是 golem 的乐观桩，返回 0。外层函数因此"看起来跑通了"。
+
+`ios_imports` 列的就是第一类名字；`ios_symbols` 的 `imports` 字段、`ios_open` 的 `imports` 与 `system_libs` 是同一份数据。导入表读三处——`LC_SYMTAB` 的未定义符号、`LC_DYLD_INFO(_ONLY)` 的 bind opcode 流（含 weak/lazy）、`LC_DYLD_CHAINED_FIXUPS` 的 imports 表；只读第一处会把 arm64 上常见的 dylib 报成"没有导入"。这条边界是第二阶段的入口（`ios_hook`），第一阶段不做。
+
+**构建要求**：默认的 `clang -arch arm64 -dynamiclib` 产出 lazy bind，golem 以 `carries lazy/weak bind streams (unsupported)` 拒绝。链接时加 `-Wl,-bind_at_load`（非 lazy bind）或 `-Wl,-fixup_chains`（chained fixups），产物才能加载。
 
 ## H5
 

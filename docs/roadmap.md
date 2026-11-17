@@ -39,12 +39,14 @@ layout: page
 | 能力 | 落地 |
 |---|---|
 | Mach-O arm64 加载 + init | `ios_open`（无 `assets:` 段、无 auxv，Darwin 默认人格） |
-| 导出符号发现 | `ios_symbols` / `ios_imports`（直接读 Mach-O，不用引擎、不用会话） |
+| 导出/导入符号发现 | `ios_symbols` / `ios_imports`（直接读 Mach-O 的导出/导入表，不用引擎；仍要一个 ios 会话 id 来定位文件） |
 | 调导出函数 | `ios_call`（整数 / `char*` / 出参缓冲，最多 8 个，符号名不带前导下划线） |
 | 引擎池与会话治理 | `pool` / `max_uses`，与 android、h5 共用 `RUNVM_MAX_SESSIONS` |
 | doctor / selftest 自检 | 仓库内嵌一个 arm64 dylib 探针，`add(3,4)` 期望 7——是真跑，不是解析 |
 
-**没做，而且这一层做不到的**：libSystem / Foundation / Objective-C。dylib 从系统库导入的符号既没有 guest 实现，也注册不了宿主桩，所以调到它们拿到的是乐观的 0（`ios_imports` 把这些名字先列出来，工具描述也写明了"未实现符号返回 not found"）。这道门是第二阶段 `ios_hook` 的前提：等 golem 把 Darwin 的 `ReplaceFns` 开出门面。
+**没做，而且这一层做不到的**：libSystem / Foundation / Objective-C。dylib 从系统库导入的符号既没有 guest 实现，也注册不了宿主桩，所以**直接 `ios_call` 它们会显式报错**（不是返回 0），而**dylib 内部间接调用它们不报错**，读到的是乐观的 0——外层函数因此"看起来跑通了"。`ios_imports` / `ios_symbols` 把这些名字先列出来（读 `LC_SYMTAB` 未定义符号、bind opcode 流、`LC_DYLD_CHAINED_FIXUPS` 三处），工具描述也写明了这个分叉。这道门是第二阶段 `ios_hook` 的前提：等 golem 把 Darwin 的 `ReplaceFns` 开出门面。
+
+**构建要求**：默认的 `clang -arch arm64 -dynamiclib` 产出 lazy bind，golem 以 `carries lazy/weak bind streams (unsupported)` 拒绝；要链接时加 `-Wl,-bind_at_load` 或 `-Wl,-fixup_chains`。
 
 ## 刻意没做
 

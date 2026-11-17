@@ -11,9 +11,12 @@
 // resolve and run. Anything imported from libSystem / Objective-C / Swift
 // (malloc, memcpy, objc_msgSend, ...) has no guest implementation and no
 // host replacement — Darwin's ReplaceFns lives behind golem's internal tree,
-// so an external module cannot register one — and an unresolved import call
-// returns 0 rather than an error (golem's optimistic stub default). Check
-// Imports()/ios_symbols first if a result looks wrong.
+// so an external module cannot register one. Two different things follow, and
+// both are true at once: calling such a name directly with ios_call fails with
+// an explicit error, while the same call made from inside the dylib is not an
+// error at all — the import reads as golem's optimistic stub, which returns 0.
+// Imports() names the first case and ReadDependencies() lists the whole table;
+// a dylib that links libSystem and "works" is usually in the second one.
 package ios
 
 import (
