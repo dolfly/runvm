@@ -3,8 +3,12 @@
 #   multica env start mcp
 #
 # 只绑回环（runvm http 在非回环地址上强制要求 token）；端口由 daemon 分配，
-# 所以这里用 $MULTICA_PORT 而不是 8765。doctor 里 android 后端需要
-# golem 的 bionic 资产（RUNVM_ASSETS），本机没配时 h5 后端仍然可用。
+# 所以这里用 $MULTICA_PORT 而不是 8765。
+#
+# android 后端要两样东西：golem 的 bionic 资产（没有就用 RUNVM_ASSETS 指），
+# 以及能被 dlopen 到的 libunicorn（macOS: `brew install unicorn`，装到 /usr/local/lib
+# 就能被默认搜索路径找到；Linux: libunicorn.so.2，或用 GOLEM_UNICORN 指路径）。
+# 缺库时 h5 后端照常可用，doctor 会如实报 degraded。
 
 [environments.mcp]
 label = "runvm MCP (HTTP)"
