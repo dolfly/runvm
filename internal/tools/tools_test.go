@@ -50,7 +50,12 @@ func TestStartReaperDisabledWithoutTimeout(t *testing.T) {
 
 func TestToolsRegistered(t *testing.T) {
 	srv, _ := New("test", Limits{})
-	want := []string{"runvm_status", "android_open", "android_hook", "android_java_stub", "h5_open", "h5_eval", "h5_wait_for", "h5_console", "h5_screenshot", "h5_close"}
+	want := []string{
+		"runvm_status",
+		"android_open", "android_symbols", "android_hook", "android_java_stub", "android_java_stubs", "android_call", "android_close",
+		"ios_open", "ios_symbols", "ios_imports", "ios_call", "ios_close",
+		"h5_open", "h5_eval", "h5_wait_for", "h5_console", "h5_screenshot", "h5_pdf", "h5_close",
+	}
 	have := map[string]bool{}
 	for _, tool := range srv.Tools() {
 		have[tool.Name] = true
@@ -62,5 +67,8 @@ func TestToolsRegistered(t *testing.T) {
 		if !have[name] {
 			t.Errorf("%s is not registered", name)
 		}
+	}
+	if len(have) != len(want) {
+		t.Errorf("tool count = %d, want %d: %v", len(have), len(want), have)
 	}
 }

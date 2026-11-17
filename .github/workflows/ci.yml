@@ -130,7 +130,7 @@ jobs:
         run: go build -tags unicorn ./...
 
       - name: test (unit only, no backends)
-        run: go test ./internal/mcp/ ./internal/session/ ./internal/android/
+        run: go test ./internal/mcp/ ./internal/session/ ./internal/android/ ./internal/ios/ ./internal/tools/
 
       - name: unicorn (macOS)
         if: runner.os == 'macOS'
