@@ -44,7 +44,14 @@ func selftestIOS() int {
 		fmt.Printf("✗ ios     add(3,4) = %d (%s), want %d\n", res.Value, ios.Hex(res.Value), iosprobe.Probe)
 		return 1
 	}
-	fmt.Printf("✓ ios     Mach-O arm64 dylib, add(3,4)=%d, engine %s, no bionic and no JNI\n",
-		res.Value, sess.Engine())
+	// The probe imports strlen, so a fixture that silently lost its import table
+	// would make every import assertion vacuous. Say what it imports.
+	imports, err := ios.Imports(path)
+	if err != nil {
+		fmt.Printf("✗ ios     imports: %v\n", err)
+		return 1
+	}
+	fmt.Printf("✓ ios     Mach-O arm64 dylib, add(3,4)=%d, engine %s, imports %d (%v), no bionic and no JNI\n",
+		res.Value, sess.Engine(), len(imports), imports)
 	return 0
 }
