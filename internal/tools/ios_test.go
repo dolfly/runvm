@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,9 +100,7 @@ func TestAndroidOpenRoutesMachO(t *testing.T) {
 	srv, set := New("test", Limits{})
 	reply := rpcCall(t, srv, "android_open", map[string]any{"so": path})
 	if reply.Result.IsError {
-		if strings.Contains(reply.text(t), "engine") || strings.Contains(reply.text(t), "libunicorn") {
-			t.Skipf("no CPU engine on this machine: %s", reply.text(t))
-		}
+		skipWithoutEngine(t, reply.text(t))
 		t.Fatalf("android_open on a Mach-O: %s", reply.text(t))
 	}
 
@@ -127,6 +126,73 @@ func TestAndroidOpenRoutesMachO(t *testing.T) {
 	}
 	if present, _ := body["assets_present"].(bool); present {
 		t.Error("an iOS session must not report bionic assets")
+	}
+}
+
+// skipWithoutEngine recognises the failure that means "this machine has no CPU
+// engine", which is a property of the host, not of the code.
+func skipWithoutEngine(t *testing.T, msg string) {
+	t.Helper()
+	for _, hint := range []string{"engine", "libunicorn", "unicorn", "backend"} {
+		if strings.Contains(msg, hint) {
+			t.Skipf("no CPU engine on this machine: %s", msg)
+		}
+	}
+}
+
+// TestIOSImportBoundaryIsHonest covers the three outcomes a caller can see,
+// because the tool descriptions promise them one by one:
+//
+//	ios_imports lists the imports; calling one directly reports it; and a
+//	function defined in the dylib that calls one gets golem's stub value 0.
+func TestIOSImportBoundaryIsHonest(t *testing.T) {
+	path, cleanup, err := iosprobe.Write()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	srv, _ := New("test", Limits{})
+	open := rpcCall(t, srv, "ios_open", map[string]any{"dylib": path})
+	if open.Result.IsError {
+		skipWithoutEngine(t, open.text(t))
+		t.Fatalf("ios_open: %s", open.text(t))
+	}
+	var opened map[string]any
+	if err := json.Unmarshal([]byte(open.text(t)), &opened); err != nil {
+		t.Fatalf("open result is not JSON: %v\n%s", err, open.text(t))
+	}
+	id, _ := opened["session"].(string)
+	if id == "" {
+		t.Fatalf("open result has no session: %v", opened)
+	}
+
+	imp := rpcCall(t, srv, "ios_imports", map[string]any{"session": id})
+	var imports struct {
+		Imports []string `json:"imports"`
+		Count   int      `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(imp.text(t)), &imports); err != nil {
+		t.Fatalf("imports result is not JSON: %v\n%s", err, imp.text(t))
+	}
+	if !slices.Contains(imports.Imports, "strlen") {
+		t.Errorf("imports = %v, want strlen (the fixture calls it and cannot have it)", imports.Imports)
+	}
+
+	// Calling the imported name must be a reported failure, not a 0.
+	bad := rpcCall(t, srv, "ios_call", map[string]any{
+		"session": id, "symbol": "strlen", "args": []any{"abcd"},
+	})
+	if !bad.Result.IsError || !strings.Contains(bad.text(t), "has no implementation") {
+		t.Errorf("calling an imported name: %q (isError=%v)", bad.text(t), bad.Result.IsError)
+	}
+
+	// A defined function still runs.
+	good := rpcCall(t, srv, "ios_call", map[string]any{
+		"session": id, "symbol": "add", "args": []any{3, 4},
+	})
+	if !strings.Contains(good.text(t), "\"value\": 7") {
+		t.Errorf("add(3,4) = %q, want value 7", good.text(t))
 	}
 }
 

@@ -46,7 +46,7 @@ flowchart TB
 
 **H5 用子进程而不是同进程**:webframe 的 `Frame` 必须建在主 goroutine 上,`Run()` 会一直阻塞它——一个页面独占一个进程。而 MCP 服务器要长期存活并服务多个会话,两者无法共存于一个主线程。所以每个页面是一个 `runvm web-host` 子进程,父子之间走一行一个 JSON 的管道:控制流清晰,页面崩了也不会带走 MCP 服务器。
 
-**iOS 的 dylib 和 Android 的 `.so` 走同一个模拟器,但不是一个后端**。分流点是**容器格式**而不是扩展名或调用方的意图:golem 自己按魔数选人格(`loader.Sniff`),所以 runvm 只需要在 `android.Open` 之前看一眼——是 Mach-O 就不喂 bionic sysroot、不建 JNI 表,交给 golem 的 Darwin 人格。`android_open` 遇到 Mach-O 也会自动转到这条路上,返回 `ios-N` 会话。诚实的边界是"纯计算":dylib 自己定义的符号能跑,它从 libSystem / Objective-C 导入的东西(`malloc`、`objc_msgSend` …)没有实现也没有宿主桩可注册(Darwin 的 `ReplaceFns` 还在 golem 的 `internal` 里),调用会返回 0,`ios_imports` 先把这些名字列出来。
+**iOS 的 dylib 和 Android 的 `.so` 走同一个模拟器,但不是一个后端**。分流点是**容器格式**而不是扩展名或调用方的意图:golem 自己按魔数选人格(`loader.Sniff`),所以 runvm 只需要在 `android.Open` 之前看一眼——是 Mach-O 就不喂 bionic sysroot、不建 JNI 表,交给 golem 的 Darwin 人格。`android_open` 遇到 Mach-O 也会自动转到这条路上,返回 `ios-N` 会话。诚实的边界是"纯计算":dylib 自己定义的符号能跑;它从 libSystem / Objective-C 导入的东西(`malloc`、`objc_msgSend` …)没有实现,也没有宿主桩可注册(Darwin 的 `ReplaceFns` 还在 golem 的 `internal` 里)。这时分两种情形:直接 `ios_call` 这个符号会明确报「imported but has no implementation」;而 dylib 内部调它,拿到的是 golem 的乐观桩 0(包了 `strlen` 的函数返回 0 而不是长度)。`ios_imports` 读的是 `LC_SYMTAB` 加 bind 流 / chained fixups——也就是 loader 真正用来绑定的那些来源——`ios_open` 的 `system_libs` 则是 `LC_LOAD_DYLIB` 的字面声明。
 
 `web-host` 里补了两件 webframe 库不做、但库的调用方必须自己做的事(它的 CLI 里做了):无 `DISPLAY` 时拉起私有 Xvfb,以及把本地路径转成 `file://` URL。
 
@@ -139,8 +139,8 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `android_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `android_close` | 释放 emulator |
 | `ios_open` | 加载 Mach-O arm64 dylib,返回 `ios-N`(无 JNI、无 bionic) |
-| `ios_symbols` | 列出导出符号(直接读 Mach-O,不依赖会话能否启动) |
-| `ios_imports` | 列出 dylib 需要的外部符号——这些没有实现,调了会返回 0 |
+| `ios_symbols` | 列出导出与导入符号(直接读 Mach-O,不依赖会话能否启动) |
+| `ios_imports` | 列出 dylib 需要的外部符号与依赖库——这些没有实现 |
 | `ios_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `ios_close` | 释放 ios 会话 |
 | `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
@@ -248,7 +248,7 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
   - 没有网络拦截。
 - **PDF:macOS 是矢量的**。`h5_pdf` 先让页面自己打印(WKWebView `createPDFWithConfiguration:`,由 `dolfly/glaze` v0.4.0 的 `PrintPDF()` 与 `dolfly/webframe-fork` v0.3.0 的 `Frame.PrintPDF()` 承载):文本还是文本、滚动内容的整页都在、而且不需要 `visible`。Linux/Windows 仍是"截图 + 嵌入"的栅格 PDF。返回值里的 `vector` 字段说明这一次拿到的是哪一种,工具描述也不再自称矢量。
 - **平台覆盖到"能启动",没到"全功能"**。CI 在 macOS(arm64)与 Windows(amd64)上跑 build + 单测 + `doctor`,`doctor` 会真的启动 WKWebView / WebView2 并加载一个页面(macOS 3.6s、Windows 8.4s 就绪),bionic 也都在 20ms 内启动。**截图三平台都有,PDF 的矢量版本只有 macOS**:Linux/Windows 的栅格 PDF 依赖抓屏,所以要 `visible: true`。
-- **iOS 只到"纯计算"**。Mach-O arm64 的 dylib 能加载、能调自己定义的导出函数(`add`、`via_fptr_table`、直接 `svc #0x80` 的 Darwin 系统调用都实测通过),但 libSystem / Foundation / Objective-C 那一层没有:外部模块注册不了 Darwin 的宿主桩,碰 `malloc` 或 `objc_msgSend` 的库拿到的是乐观的 0。等 golem 把 Darwin 的 `ReplaceFns` 开出门面(`ios_hook` 的第二阶段)之前,这个边界不会变。工具描述里写明了这一点,因为"函数返回 0"看起来很像"函数就是返回 0"。
+- **iOS 只到"纯计算"**。Mach-O arm64 的 dylib 能加载、能调自己定义的导出函数(`add`、`via_fptr_table`、直接 `svc #0x80` 的 Darwin 系统调用都实测通过),但 libSystem / Foundation / Objective-C 那一层没有:外部模块注册不了 Darwin 的宿主桩。直接调这类导入符号会明确报「imported but has no implementation」,而库内部调它会拿到 golem 的乐观 0——包了 `strlen` 的函数返回 0,而不是长度。等 golem 把 Darwin 的 `ReplaceFns` 开出门面(`ios_hook` 的第二阶段)之前,这个边界不会变。工具描述里写明了这一点,因为"函数返回 0"看起来很像"函数就是返回 0"。
 - **`go.mod` 里有一条 `replace`**。webframe 把 glaze 钉在作者的 fork 上,而 Go 会忽略依赖里的 `replace`,所以本模块必须重复一遍;升级 webframe 时这里要跟着改。
 
 ## 开发

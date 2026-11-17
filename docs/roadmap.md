@@ -39,12 +39,20 @@ layout: page
 | 能力 | 落地 |
 |---|---|
 | Mach-O arm64 加载 + init | `ios_open`（无 `assets:` 段、无 auxv，Darwin 默认人格） |
-| 导出符号发现 | `ios_symbols` / `ios_imports`（直接读 Mach-O，不用引擎、不用会话） |
+| 导出符号发现 | `ios_symbols`（读 Mach-O 符号表，不用引擎、不用会话） |
+| 导入符号与依赖库 | `ios_imports`（同时读 `LC_SYMTAB` 与 bind 流 / chained fixups）与 `ios_open` 结果里的 `system_libs`（`LC_LOAD_DYLIB` 声明） |
 | 调导出函数 | `ios_call`（整数 / `char*` / 出参缓冲，最多 8 个，符号名不带前导下划线） |
 | 引擎池与会话治理 | `pool` / `max_uses`，与 android、h5 共用 `RUNVM_MAX_SESSIONS` |
 | doctor / selftest 自检 | 仓库内嵌一个 arm64 dylib 探针，`add(3,4)` 期望 7——是真跑，不是解析 |
 
-**没做，而且这一层做不到的**：libSystem / Foundation / Objective-C。dylib 从系统库导入的符号既没有 guest 实现，也注册不了宿主桩，所以调到它们拿到的是乐观的 0（`ios_imports` 把这些名字先列出来，工具描述也写明了"未实现符号返回 not found"）。这道门是第二阶段 `ios_hook` 的前提：等 golem 把 Darwin 的 `ReplaceFns` 开出门面。
+**加载限制**：golem 不模拟 dyld 的 lazy stub binder，带 lazy/weak bind 流的 dylib 会被直接拒绝（诊断很明确）。`-Wl,-bind_at_load` 把 bind 放到非 lazy 流里就能跑；runvm 把这个建议拼在错误信息后面，免得调用方对着 golem 的原始报错猜。
+
+**没做，而且这一层做不到的**：libSystem / Foundation / Objective-C。dylib 从系统库导入的符号既没有 guest 实现，也注册不了宿主桩。分两种情形，必须分清：
+
+- **直接调它**：`ios_call` 报「imported by the dylib but has no implementation」，不返回数字；
+- **dylib 内部调它**：golem 把未解析导入绑到乐观桩，拿到 0（例如自己包了 `strlen` 的函数返回 0 而不是长度）。这不是错误，是设计上的取舍，所以要靠 `ios_imports` 先看清缺什么。
+
+这道门是第二阶段 `ios_hook` 的前提：等 golem 把 Darwin 的 `ReplaceFns` 开出门面。
 
 ## 刻意没做
 

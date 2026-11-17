@@ -9,11 +9,17 @@
 //
 // The honest scope is "pure computation": symbols defined by the dylib itself
 // resolve and run. Anything imported from libSystem / Objective-C / Swift
-// (malloc, memcpy, objc_msgSend, ...) has no guest implementation and no
-// host replacement — Darwin's ReplaceFns lives behind golem's internal tree,
-// so an external module cannot register one — and an unresolved import call
-// returns 0 rather than an error (golem's optimistic stub default). Check
-// Imports()/ios_symbols first if a result looks wrong.
+// (malloc, memcpy, objc_msgSend, ...) has no guest implementation and no host
+// replacement, because Darwin's ReplaceFns lives behind golem's internal tree
+// so an external module cannot register one. Two different things follow, and
+// they must not be confused:
+//
+//   - calling the imported name directly fails: ios_call reports the symbol as
+//     imported but unimplemented instead of returning a number;
+//   - the dylib calling it internally does not fail. golem binds unresolved
+//     imports to an optimistic stub that returns 0, so a library whose
+//     malloc/copy result is swallowed looks like it ran fine. Imports() lists
+//     what is missing, and ios_imports exists for exactly that question.
 package ios
 
 import (
@@ -215,35 +221,34 @@ func Exports(path string) ([]string, error) {
 }
 
 // Imports lists the symbols the dylib needs from outside itself, with the same
-// leading-underscore trimming golem applies. Anything here is a candidate for
-// "has no implementation": runvm cannot supply libSystem or Objective-C
-// symbols, so a non-empty list is the honest explanation for a call that
-// returns a surprising 0.
+// leading-underscore trimming golem applies. Both the undefined symbol table
+// and the linker's bind streams are read (see macho.go): a plain clang dylib
+// reports its imports through bind opcodes, not through LC_SYMTAB, and reading
+// only the symbol table would answer "no such symbol" for a name that is
+// clearly there.
 func Imports(path string) ([]string, error) {
-	f, err := macho.Open(path)
+	m, err := readImageMeta(path)
 	if err != nil {
 		return nil, fmt.Errorf("read imports: %w", err)
 	}
-	defer f.Close()
-	ims, err := f.ImportedSymbols()
+	if m.Imports == nil {
+		m.Imports = []string{}
+	}
+	return m.Imports, nil
+}
+
+// Libraries lists the dylibs the image links against, from LC_LOAD_DYLIB and
+// its weak/reexport/upward variants. It is what the file actually declares, so
+// "no imports but linked against libSystem" cannot be read as "self-contained".
+func Libraries(path string) ([]string, error) {
+	m, err := readImageMeta(path)
 	if err != nil {
-		return nil, fmt.Errorf("read imported symbols: %w", err)
+		return nil, fmt.Errorf("read libraries: %w", err)
 	}
-	seen := map[string]struct{}{}
-	names := make([]string, 0, len(ims))
-	for _, name := range ims {
-		n := strings.TrimPrefix(name, "_")
-		if n == "" {
-			continue
-		}
-		if _, dup := seen[n]; dup {
-			continue
-		}
-		seen[n] = struct{}{}
-		names = append(names, n)
+	if m.Libraries == nil {
+		m.Libraries = []string{}
 	}
-	sort.Strings(names)
-	return names, nil
+	return m.Libraries, nil
 }
 
 // IsMachO reports whether path is a Mach-O object file. Only the header is

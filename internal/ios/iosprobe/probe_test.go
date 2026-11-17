@@ -3,6 +3,8 @@ package iosprobe
 import (
 	"debug/macho"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -32,15 +34,25 @@ func TestFixtureIsWhatItClaims(t *testing.T) {
 	if f.Symtab == nil {
 		t.Fatal("fixture has no symbol table; rebuild it from FixtureSource")
 	}
-	found := false
+	var defined, undefined []string
 	for _, s := range f.Symtab.Syms {
-		if s.Name == "_add" {
-			found = true
-			break
+		name := strings.TrimPrefix(s.Name, "_")
+		if s.Sect == 0 {
+			undefined = append(undefined, name)
+			continue
+		}
+		defined = append(defined, name)
+	}
+	for _, want := range []string{"add", "length"} {
+		if !slices.Contains(defined, want) {
+			t.Errorf("fixture does not export %s (exports: %v); rebuild it from FixtureSource", want, defined)
 		}
 	}
-	if !found {
-		t.Error(`fixture does not export _add; rebuild it from FixtureSource`)
+	// The import is what makes the boundary testable: without it, "imported but
+	// unimplemented" can never be observed and a regression would be invisible.
+	if !slices.Contains(undefined, FixtureImport) {
+		t.Errorf("fixture does not import %s (imports: %v); rebuild it with -Wl,-bind_at_load",
+			FixtureImport, undefined)
 	}
 
 	st, err := os.Stat(path)
