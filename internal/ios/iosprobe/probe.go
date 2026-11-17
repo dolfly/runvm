@@ -7,6 +7,12 @@
 // and Windows runners do not have, so the dylib is a committed test fixture:
 // every platform can run the same probe, and doctor/selftest report whether
 // it produced the value it must.
+//
+// The fixture deliberately imports one symbol (strlen) and defines one
+// function that calls it (length). That is what makes the backend's boundary
+// observable: add runs, length returns the optimistic stub's 0. A probe with
+// only pure-compute functions would pass while proving nothing about the
+// honest-failure story the tool descriptions promise.
 package iosprobe
 
 import (
@@ -25,13 +31,29 @@ var Fixture []byte
 // FixtureSource is the C the dylib was built from; kept here so the blob is
 // reviewable and reproducible:
 //
+//	#include <string.h>
+//
 //	long add(long a, long b) { return a + b; }
 //
-// Build (macOS with Xcode's command line tools):
+//	// calls strlen, which this dylib imports: runvm's stub answers 0
+//	long length(const char *s) { return (long)strlen(s); }
+//
+// Build (macOS with Xcode's command line tools; -bind_at_load is required,
+// because runvm does not emulate dyld's lazy stub binder):
 //
 //	clang -arch arm64 -target arm64-apple-macos11 -dynamiclib -O2 \
-//	      -o probe_darwin_arm64.dylib probe_darwin_arm64.c
-const FixtureSource = "long add(long a, long b) { return a + b; }\n"
+//	      -Wl,-bind_at_load -o probe_darwin_arm64.dylib probe.c
+const FixtureSource = "#include <string.h>\n" +
+	"\n" +
+	"long add(long a, long b) { return a + b; }\n" +
+	"\n" +
+	"/* calls strlen, which this dylib imports: the boundary the iOS backend\n" +
+	" * cannot cross. golem's stub answers 0, so this returns 0, not 4. */\n" +
+	"long length(const char *s) { return (long)strlen(s); }\n"
+
+// FixtureImport is the symbol the fixture imports and cannot have resolved.
+// Calling it directly must report "imported but has no implementation".
+const FixtureImport = "strlen"
 
 // Write materializes the fixture in a fresh temp directory, returning its
 // path and a cleanup func. A caller that only needs the bytes should use

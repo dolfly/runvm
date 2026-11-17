@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,17 +149,46 @@ func TestCallAdd(t *testing.T) {
 	}
 }
 
-// TestImportsAreReported proves the honest failure mode: a dylib's imports are
-// listed, and calling one does not silently look like a working function.
+// TestImportsAreReported is the end of the honest-failure contract: the
+// fixture's imports are listed, calling one says so, and the function that
+// calls it internally gets the optimistic stub's 0 instead of the answer the
+// real libc would give. All three are what the tool descriptions promise, so
+// a regression here is user-visible.
 func TestImportsAreReported(t *testing.T) {
 	imports, err := Imports(probePath(t))
 	if err != nil {
 		t.Fatalf("imports: %v", err)
 	}
-	// The fixture defines add and imports nothing beyond the runtime's own
-	// dyld stubs, so the meaningful assertion is that the call succeeds.
-	if imports == nil {
-		t.Error("imports must be a slice, never nil")
+	if !slices.Contains(imports, "strlen") {
+		t.Errorf("imports = %v, want strlen among them", imports)
+	}
+
+	if !engineAvailable(t) {
+		t.Skip("no CPU engine: build with -tags unicorn and point GOLEM_UNICORN at libunicorn")
+	}
+	sess, err := Open(probePath(t), OpenOptions{Pool: 1})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer sess.Close()
+	ctx := context.Background()
+
+	// Calling the imported name directly must fail, not return 0: "no such
+	// symbol" and "imported but unimplemented" need to stay distinguishable.
+	_, err = sess.Call(ctx, "strlen", []Arg{Arg{Kind: ArgString, Str: "abcd"}})
+	if err == nil || !strings.Contains(err.Error(), "imported by the dylib but has no implementation") {
+		t.Errorf("call to an imported name: err = %v, want the 'imported but has no implementation' explanation", err)
+	}
+
+	// length() is defined here but calls strlen; golem's stub answers 0, so
+	// the correct answer is 0, not 4. This documents the sharp edge rather
+	// than hiding it.
+	res, err := sess.Call(ctx, "length", []Arg{Arg{Kind: ArgString, Str: "abcd"}})
+	if err != nil {
+		t.Fatalf("call length: %v", err)
+	}
+	if res.Value != 0 {
+		t.Errorf("length(\"abcd\") = %d, want 0 (golem's optimistic stub for strlen)", res.Value)
 	}
 }
 
