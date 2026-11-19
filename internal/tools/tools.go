@@ -222,6 +222,7 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 				"Strings exposed to the page as webframe.env (before any page script)"),
 			"ephemeral": boolean("Keep cookies, storage and cache in memory only (default true)"),
 			"visible":   boolean("Draw the page in a window instead of offscreen; required for h5_screenshot on Linux/Windows"),
+			"webbrain":  boolean("Inject WebBrain's page-control scripts (accessibility tree + DOM actions) after load, so the webbrain tool can drive the page"),
 			"width":     num("View width in points (default 1280 when visible). Also the page width of an h5_pdf print, so a hidden 1280x720 view prints a 16:9 document"),
 			"height":    num("View height in points (default 800 when visible)"),
 		}, "target"),
@@ -294,6 +295,37 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Description: "Close a page session and stop its host process.",
 		InputSchema: object(map[string]any{"session": str("Session id from h5_open")}, "session"),
 		Handler:     s.h5Close,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "webbrain",
+		Description: "Drive a page with WebBrain's own page-control scripts (accessibility tree + DOM actions), " +
+			"loaded from assets/h5/webbrain when the session was opened with \"webbrain\": true. " +
+			"This is the same perception/action stack the WebBrain browser-extension agent uses: " +
+			"the page is read as a flat accessibility tree with stable ref_id references, and actions " +
+			"target those ref_ids (or viewport coordinates / visible text). Actions: " +
+			"page (title/url/meta), tree (accessibility tree text), interactive (clickable/typeable elements), " +
+			"snapshot (page + compact tree in one call), click, type, press, scroll, check. " +
+			"Prefer ref_id from tree/interactive for precision; coordinates and text matching are fallbacks.",
+		InputSchema: object(map[string]any{
+			"session":    str("Session id from h5_open (opened with webbrain: true)"),
+			"action":     str("page | tree | interactive | snapshot | click | type | press | scroll | check"),
+			"ref_id":     str("Stable ref_id from a tree/interactive/snapshot read; for click/type/scroll/check"),
+			"text":       str("Text to type (type) or to click by visible text (click with text_match)"),
+			"clear":      boolean("Clear the field before typing (type)"),
+			"filter":     str("Tree filter: all | visible | interactive (tree, default all)"),
+			"max_depth":  num("Tree depth cap (tree, default 15)"),
+			"max_chars":  num("Tree output cap in chars (tree/snapshot, default 30000)"),
+			"x":          num("Viewport x (click/scroll)"),
+			"y":          num("Viewport y (click/scroll)"),
+			"selector":   str("CSS selector to click (click; no :contains()/:has-text())"),
+			"text_match": str("exact | contains — how text matches a click target (click, default exact)"),
+			"key":        str("Key to press: Escape, Tab, Enter, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ; (press)"),
+			"repeat":     num("Key repeat, 1-3 (press, default 1)"),
+			"checked":    boolean("Target checked state (check)"),
+			"timeout_ms": num("Action timeout (default 60000)"),
+		}, "session", "action"),
+		Handler: s.webbrainTool,
 	})
 
 	s.registerCatalog(srv)
@@ -451,6 +483,52 @@ Report: what loaded, what the assertions saw, any console errors, the screenshot
 5. android_close
 
 Report: engine, export count, the call you made, the value, and anything that looked wrong.`, so, so, symbol), nil
+		},
+	})
+
+	srv.AddPrompt(mcp.Prompt{
+		Name:        "webbrain-automate",
+		Description: "Plan and run a multi-step browser automation task with the webbrain tool (perceive, act, verify).",
+		Arguments: []mcp.PromptArgument{
+			{Name: "task", Description: "What to accomplish on the page, in plain language", Required: true},
+			{Name: "url", Description: "Target URL to open first (optional: use the current h5 session)"},
+			{Name: "max_steps", Description: "Act/verify loop cap before reporting (default 6)"},
+		},
+		Build: func(args map[string]string) (string, error) {
+			task, err := mcp.RequireArg(args, "task")
+			if err != nil {
+				return "", err
+			}
+			url := args["url"]
+			steps := args["max_steps"]
+			if steps == "" {
+				steps = "6"
+			}
+			open := ""
+			if url != "" {
+				open = fmt.Sprintf("1. Open the page: h5_open with {\"target\": %q, \"webbrain\": true, \"visible\": false}. Keep the returned session id for every later call.\n", url)
+			} else {
+				open = "1. If no h5 session exists yet, h5_open with {\"webbrain\": true} first; otherwise reuse the open session.\n"
+			}
+			return fmt.Sprintf(`Complete this browser automation task with runvm's webbrain tool.
+
+Task: %s
+
+%s2. Perceive: webbrain snapshot (or tree with filter "interactive") to learn the page's
+   structure and get stable ref_ids. If the page is still loading, h5_wait_for a selector
+   first. Re-read when the page changes.
+3. Plan in your head: list the concrete actions needed, in order, each addressed by a
+   ref_id from the last read (fall back to text/coordinates only when no ref_id fits).
+4. Act one step at a time: webbrain click / type / press / scroll / check. After an action
+   that changes the page, re-snapshot or re-read the tree before the next action.
+5. Verify: check the outcome (page info, a fresh tree read, or h5_eval) before declaring
+   success. If a ref_id is stale or missing, re-read the tree and retry with a fresh id.
+6. Loop steps 3-5 up to %s times, then report.
+7. Close: h5_close the session when done.
+
+Report: what you did at each step (action + ref_id + result), what you verified, and
+whether the task is complete. Keep every intermediate read small (max_chars) so the
+conversation stays light.`, task, open, steps), nil
 		},
 	})
 }
@@ -1057,6 +1135,7 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 		Env       map[string]string `json:"env"`
 		Ephemeral *bool             `json:"ephemeral"`
 		Visible   *bool             `json:"visible"`
+		Webbrain  *bool             `json:"webbrain"`
 		Width     int               `json:"width"`
 		Height    int               `json:"height"`
 	}
@@ -1084,7 +1163,16 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	id := s.H5.Add(sess)
-	return map[string]any{"session": id, "target": sess.Target()}, nil
+	if a.Webbrain != nil && *a.Webbrain {
+		mcp.Notify(ctx, 0.8, "h5_open: injecting webbrain page scripts")
+		if err := h5.InjectWebbrain(ctx, sess); err != nil {
+			_ = sess.Close()
+			s.H5.Delete(id)
+			return nil, fmt.Errorf("h5_open: webbrain: %w", err)
+		}
+		mcp.Notify(ctx, 0.95, "h5_open: webbrain ready")
+	}
+	return map[string]any{"session": id, "target": sess.Target(), "webbrain": a.Webbrain != nil && *a.Webbrain}, nil
 }
 
 func (s *Set) h5Eval(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -1321,6 +1409,147 @@ func (s *Set) h5Close(_ context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("h5_close: %w", err)
 	}
 	return map[string]any{"closed": a.Session}, nil
+}
+
+// webbrainTool drives a page through WebBrain's content scripts. One tool,
+// many actions: perception (page/tree/interactive/snapshot) and control
+// (click/type/press/scroll/check) over stable ref_ids from the tree.
+func (s *Set) webbrainTool(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Session   string `json:"session"`
+		Action    string `json:"action"`
+		RefID     string `json:"ref_id"`
+		Text      string `json:"text"`
+		Clear     *bool  `json:"clear"`
+		Filter    string `json:"filter"`
+		MaxDepth  *int   `json:"max_depth"`
+		MaxChars  *int   `json:"max_chars"`
+		X         *int   `json:"x"`
+		Y         *int   `json:"y"`
+		Selector  string `json:"selector"`
+		TextMatch string `json:"text_match"`
+		Key       string `json:"key"`
+		Repeat    *int   `json:"repeat"`
+		Checked   *bool  `json:"checked"`
+		TimeoutMS *int   `json:"timeout_ms"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.Action == "" {
+		return nil, fmt.Errorf("webbrain: action is required")
+	}
+	sess, err := s.h5Session(a.Session)
+	if err != nil {
+		return nil, err
+	}
+	if a.TimeoutMS == nil || *a.TimeoutMS <= 0 {
+		def := 60000
+		a.TimeoutMS = &def
+	}
+
+	contentAction := ""
+	params := map[string]any{}
+	switch a.Action {
+	case "page":
+		contentAction = "get_page_info"
+	case "tree":
+		contentAction = "get_accessibility_tree"
+		if a.Filter != "" {
+			params["filter"] = a.Filter
+		}
+		if a.MaxDepth != nil {
+			params["maxDepth"] = *a.MaxDepth
+		}
+		if a.MaxChars != nil {
+			params["maxChars"] = *a.MaxChars
+		}
+		if a.RefID != "" {
+			params["ref_id"] = a.RefID
+		}
+	case "interactive":
+		contentAction = "get_interactive_elements"
+	case "snapshot":
+		// page + compact tree in one call: the model's usual first look
+		page, err := h5.WebbrainAct(ctx, sess, "get_page_info", nil, time.Duration(*a.TimeoutMS)*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		treeParams := map[string]any{"filter": "interactive", "maxDepth": 12}
+		if a.MaxChars != nil {
+			treeParams["maxChars"] = *a.MaxChars
+		}
+		tree, err := h5.WebbrainAct(ctx, sess, "get_accessibility_tree", treeParams, time.Duration(*a.TimeoutMS)*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"page": page, "tree": tree}, nil
+	case "click":
+		if a.RefID != "" {
+			contentAction = "click_ax"
+			params["ref_id"] = a.RefID
+		} else {
+			contentAction = "click"
+			if a.Selector != "" {
+				params["selector"] = a.Selector
+			}
+			if a.Text != "" {
+				params["text"] = a.Text
+			}
+			if a.TextMatch != "" {
+				params["textMatch"] = a.TextMatch
+			}
+			if a.X != nil && a.Y != nil {
+				params["x"] = *a.X
+				params["y"] = *a.Y
+			}
+		}
+	case "type":
+		contentAction = "type"
+		if a.RefID != "" {
+			params["ref_id"] = a.RefID
+		}
+		params["text"] = a.Text
+		if a.Clear != nil {
+			params["clear"] = *a.Clear
+		}
+	case "press":
+		contentAction = "press_keys"
+		if a.Key == "" {
+			return nil, fmt.Errorf("webbrain: press requires key (Escape, Tab, Enter, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ;)")
+		}
+		params["key"] = a.Key
+		if a.Repeat != nil {
+			params["repeat"] = *a.Repeat
+		}
+	case "scroll":
+		contentAction = "scroll"
+		if a.RefID != "" {
+			params["ref_id"] = a.RefID
+		}
+		if a.X != nil {
+			params["x"] = *a.X
+		}
+		if a.Y != nil {
+			params["y"] = *a.Y
+		}
+	case "check":
+		contentAction = "set_checked"
+		if a.RefID == "" {
+			return nil, fmt.Errorf("webbrain: check requires ref_id")
+		}
+		params["ref_id"] = a.RefID
+		if a.Checked != nil {
+			params["checked"] = *a.Checked
+		}
+	default:
+		return nil, fmt.Errorf("webbrain: unknown action %q (page|tree|interactive|snapshot|click|type|press|scroll|check)", a.Action)
+	}
+	result, err := h5.WebbrainAct(ctx, sess, contentAction, params, time.Duration(*a.TimeoutMS)*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Set) h5Session(id string) (*h5.Session, error) {

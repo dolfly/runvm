@@ -26,6 +26,13 @@ RUN mkdir -p /out/assets && \
     cp -r "$(go list -m -f '{{.Dir}}' github.com/isesword/golem)/assets/." /out/assets/ && \
     ls /out/assets/android/sdk23/lib64/libc.so >/dev/null
 
+# WebBrain page-control scripts (assets/h5/webbrain) are runtime assets loaded
+# by the h5/webbrain tool; copy them next to the sysroot so RUNVM_ASSETS covers
+# both. They are GPL-3.0-or-later; their README and LICENSE ship alongside.
+RUN mkdir -p /out/assets/h5/webbrain && \
+    cp -r assets/h5/webbrain/. /out/assets/h5/webbrain/ && \
+    ls /out/assets/h5/webbrain/content.js >/dev/null
+
 # Runtime stage: the libraries the two backends need, and nothing else.
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 

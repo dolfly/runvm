@@ -62,17 +62,42 @@ layout: page
 
 | 工具 | 关键参数 | 作用 |
 |---|---|---|
-| `h5_open` | `target`、`env`、`ephemeral`、`visible`、`width`/`height` | 打开页面，返回会话 |
+| `h5_open` | `target`、`env`、`ephemeral`、`visible`、`webbrain`、`width`/`height` | 打开页面，返回会话 |
 | `h5_eval` | `session`、`js`、`timeout_ms` | 执行 JS，Promise 会被 await |
 | `h5_wait_for` | `session`、`expression` 或 `selector`、`timeout_ms` | 轮询到条件成立 |
 | `h5_console` | `session`、`clear` | 取回 console 与页面异常 |
 | `h5_screenshot` | `session`、`path` | 截图（PNG），可同时落盘 |
 | `h5_pdf` | `session`、`path` | 导出单页 PDF：macOS 矢量打印，其余平台栅格；结果里 `vector` 说明精度 |
 | `h5_close` | `session` | 关掉页面宿主进程 |
+| `webbrain` | `session`、`action`、`ref_id`、`text`、… | 用 WebBrain 的页面控制脚本驱动页面（见下） |
 
 `h5_open` 的 `env` 会以 `webframe.env` 暴露给页面；`ephemeral` 默认 `true`，cookie/存储/缓存只留内存。
 
 `h5_eval` 返回的是格式化文本：字符串带引号，对象是 JSON。要结构化数据就在 JS 里 `JSON.stringify`。
+
+### webbrain 工具（WebBrain 页面控制能力）
+
+`h5_open` 传 `"webbrain": true` 时，会在页面加载后自动注入 WebBrain 浏览器扩展的两份内容脚本
+（`assets/h5/webbrain/`，从 [webbrain-one/webbrain](https://github.com/webbrain-one/webbrain)
+v49.1.2 原样提取：`accessibility-tree.js` + `content.js`，GPL-3.0-or-later；`shim.js` 是 runvm 自己的
+MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`）。注入后 `webbrain` 工具用同一套
+感知/控制栈驱动页面——与 WebBrain 扩展 agent 在浏览器里用的是同一份代码：
+
+| action | 作用 | 关键参数 |
+|---|---|---|
+| `page` | 页面信息：标题、描述、表单、链接 | — |
+| `tree` | 扁平可访问性树，节点带稳定 `ref_id` | `filter`（all/visible/interactive）、`max_depth`、`max_chars`、`ref_id` |
+| `interactive` | 可交互元素清单（role/name/ref） | — |
+| `snapshot` | `page` + 紧凑 `tree` 一次调用，模型首看常用 | `max_chars` |
+| `click` | 点击：优先 `ref_id`（`click_ax`），或 `text`/`selector`/`x`+`y` | `ref_id`、`text`、`text_match`、`selector`、`x`、`y` |
+| `type` | 输入文本，可先清空 | `ref_id`、`text`、`clear` |
+| `press` | 按键：Escape/Tab/Enter/方向键/分号 | `key`、`repeat` |
+| `scroll` | 滚动：`ref_id` 定位或视口 `x`/`y` | `ref_id`、`x`、`y` |
+| `check` | 勾选/取消复选框 | `ref_id`、`checked` |
+
+`ref_id` 来自 `tree` / `interactive` / `snapshot`，在元素存活期间稳定（WeakRef 注册表），是
+点击/输入/滚动/勾选的首选寻址方式。页面整页导航后注入的全局会被清掉，`webbrain` 工具会在下一次
+调用前自动重新注入（`EnsureWebbrain` 先探测 `__webbrainReady`，缺失才重注入）。
 
 ## 资源
 
@@ -89,6 +114,9 @@ layout: page
 |---|---|---|
 | `smoke-test-page` | `url`、`expectation` | 打开 → wait_for → 断言 → 截图 → 收 console → 关闭 |
 | `inspect-native-lib` | `so`、`symbol` | 加载 .so → 列导出 → 调用 → 必要时 hook → 关闭 |
+| `webbrain-automate` | `task`、`url`、`max_steps` | 多步浏览器自动化：打开 → 感知(snapshot/tree) → 按 ref_id 逐步 act → 验证 → 报告 → 关闭 |
+
+编排：`webbrain-automate` 把上面的感知-计划-行动-验证循环实例化成一段可直接执行的工作流指令。配套的代理技能在 `skills/webbrain/SKILL.md`（可导入任意 MCP 客户端，指挥 LLM 调用 `webbrain` / `h5_*` 工具做多步页面自动化，替代人工点击）。
 
 ## 进度与取消
 

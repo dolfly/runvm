@@ -65,7 +65,7 @@ layout: page
 ## 接下来
 
 - [快速开始](getting-started.md) —— 三种安装方式、接到 MCP 客户端
-- [工具参考](tools.md) —— 20 个工具、4 个资源、2 个提示词
+- [工具参考](tools.md) —— 21 个工具、4 个资源、2 个提示词
 - [技术架构](architecture.md) —— 进程模型、两个 fork、失败语义
 - [运行与运维](operations.md) —— 环境变量、会话治理、远程访问
 - [现状与缺口](roadmap.md) —— 还有什么没做，为什么
