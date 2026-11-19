@@ -114,6 +114,9 @@ MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`�
 |---|---|---|
 | `smoke-test-page` | `url`、`expectation` | 打开 → wait_for → 断言 → 截图 → 收 console → 关闭 |
 | `inspect-native-lib` | `so`、`symbol` | 加载 .so → 列导出 → 调用 → 必要时 hook → 关闭 |
+| `webbrain-automate` | `task`、`url`、`max_steps` | 多步浏览器自动化：打开 → 感知(snapshot/tree) → 按 ref_id 逐步 act → 验证 → 报告 → 关闭 |
+
+编排：`webbrain-automate` 把上面的感知-计划-行动-验证循环实例化成一段可直接执行的工作流指令。配套的代理技能在 `skills/webbrain/SKILL.md`（可导入任意 MCP 客户端，指挥 LLM 调用 `webbrain` / `h5_*` 工具做多步页面自动化，替代人工点击）。
 
 ## 进度与取消
 

@@ -485,6 +485,52 @@ Report: what loaded, what the assertions saw, any console errors, the screenshot
 Report: engine, export count, the call you made, the value, and anything that looked wrong.`, so, so, symbol), nil
 		},
 	})
+
+	srv.AddPrompt(mcp.Prompt{
+		Name:        "webbrain-automate",
+		Description: "Plan and run a multi-step browser automation task with the webbrain tool (perceive, act, verify).",
+		Arguments: []mcp.PromptArgument{
+			{Name: "task", Description: "What to accomplish on the page, in plain language", Required: true},
+			{Name: "url", Description: "Target URL to open first (optional: use the current h5 session)"},
+			{Name: "max_steps", Description: "Act/verify loop cap before reporting (default 6)"},
+		},
+		Build: func(args map[string]string) (string, error) {
+			task, err := mcp.RequireArg(args, "task")
+			if err != nil {
+				return "", err
+			}
+			url := args["url"]
+			steps := args["max_steps"]
+			if steps == "" {
+				steps = "6"
+			}
+			open := ""
+			if url != "" {
+				open = fmt.Sprintf("1. Open the page: h5_open with {\"target\": %q, \"webbrain\": true, \"visible\": false}. Keep the returned session id for every later call.\n", url)
+			} else {
+				open = "1. If no h5 session exists yet, h5_open with {\"webbrain\": true} first; otherwise reuse the open session.\n"
+			}
+			return fmt.Sprintf(`Complete this browser automation task with runvm's webbrain tool.
+
+Task: %s
+
+%s2. Perceive: webbrain snapshot (or tree with filter "interactive") to learn the page's
+   structure and get stable ref_ids. If the page is still loading, h5_wait_for a selector
+   first. Re-read when the page changes.
+3. Plan in your head: list the concrete actions needed, in order, each addressed by a
+   ref_id from the last read (fall back to text/coordinates only when no ref_id fits).
+4. Act one step at a time: webbrain click / type / press / scroll / check. After an action
+   that changes the page, re-snapshot or re-read the tree before the next action.
+5. Verify: check the outcome (page info, a fresh tree read, or h5_eval) before declaring
+   success. If a ref_id is stale or missing, re-read the tree and retry with a fresh id.
+6. Loop steps 3-5 up to %s times, then report.
+7. Close: h5_close the session when done.
+
+Report: what you did at each step (action + ref_id + result), what you verified, and
+whether the task is complete. Keep every intermediate read small (max_chars) so the
+conversation stays light.`, task, open, steps), nil
+		},
+	})
 }
 
 // reserved reports whether another session would exceed the configured cap.
