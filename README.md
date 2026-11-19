@@ -19,7 +19,7 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>20 个工具"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>21 个工具"]
   S --> REG["session.Store<br/>android-N / ios-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
   REG --> I["ios 后端<br/>in-process"]
@@ -268,7 +268,7 @@ make doctor      # 自检要单独构建：golem 靠二进制里的模块路径�
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   20 个工具的参数校验与调用编排
+internal/tools/   21 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/ios/     golem 会话池 + Mach-O 导出/导入表(无 JNI)

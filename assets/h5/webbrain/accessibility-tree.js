@@ -1,0 +1,2233 @@
+/**
+ * WebBrain — in-page accessibility tree builder.
+ *
+ * This is a port of the approach used by Claude for Chrome
+ * (claudeplugin/assets/accessibility-tree.js). The original ships minified;
+ * this is a clean re-implementation of the same algorithm.
+ *
+ * Key properties (match Claude's behaviour):
+ *
+ * 1. OUTPUT IS A FLAT INDENTED TEXT STRING, not a JSON tree. Each kept node
+ *    becomes one line:
+ *
+ *        button "Sign in" [ref_42] type="submit"
+ *          option "United States" [ref_43] (selected)
+ *        link "Pricing" [ref_44] href="/pricing"
+ *
+ *    Indentation is 1 space per tree-depth level (depth increases for kept
+ *    ancestors; skipped ancestors don't bump depth, so the tree visually
+ *    flattens generic containers).
+ *
+ * 2. ref_id IS STABLE ACROSS CALLS. ref_ids live in window.__wbElementMap as
+ *    WeakRefs, so an element keeps its `ref_N` identifier for as long as it
+ *    remains in the DOM. Between calls we sweep entries whose deref() is
+ *    gone, so the map doesn't grow unbounded.
+ *
+ * 3. Parameters:
+ *      filter:  'all' | 'visible' | 'interactive' (default 'all')
+ *      maxDepth: number of tree levels to descend (default 15)
+ *      maxChars: hard cap on total output length
+ *      refId:   if set, build the subtree rooted at that previously-seen
+ *               element instead of document.body. Enables follow-up reads
+ *               like "read the subtree under the nav I already identified".
+ *
+ * 4. Node keep-criteria (in 'visible' or 'interactive' filter):
+ *      a) element passes the filter's visibility / interactivity check, AND
+ *      b) EITHER is interactive, OR is a landmark/heading, OR has a computed
+ *         accessible name, OR has a non-generic, non-image role.
+ *
+ *    Skipped nodes still contribute their children to the output (children
+ *    are emitted at the parent's depth, so generic wrappers collapse).
+ *
+ * 5. Additional exports used by click_ax / type_ax:
+ *      window.__wb_ax_lookup(refId) → Element | null
+ *      window.__wb_ax_ref(element) → stable refId
+ *      window.__wb_ax_release(refId) → void (optional cleanup)
+ *      window.__wb_ax_name(element) → the raw accessible name, for matching
+ *      window.__wb_ax_model_name(element, name?) → the name a tool result may
+ *        show the model (the tree's; signed-in account chrome is generic)
+ *      window.__wb_ax_model_href(element, href) → the href a tool result may
+ *        show the model
+ *      window.__wb_ax_account_chrome(element) → whether it is that chrome
+ */
+(() => {
+  if (window.__wb_ax_installed) return;
+  window.__wb_ax_installed = true;
+
+  // ── Persistent ref_id registry ──────────────────────────────────────────
+  if (!window.__wbElementMap) window.__wbElementMap = Object.create(null);
+  if (typeof window.__wbRefCounter !== 'number') window.__wbRefCounter = 0;
+
+  function formatTreeHref(href) {
+    const escaped = String(href).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\s/g, ' ');
+    if (escaped.length <= 512) return ' href="' + escaped + '"';
+    return ' [long href omitted; use this element ref to navigate]';
+  }
+
+  function mintRefScopeId() {
+    try {
+      const words = new Uint32Array(2);
+      globalThis.crypto.getRandomValues(words);
+      const value = (BigInt(words[0]) << 32n) | BigInt(words[1]);
+      return (value % 1000000000000n).toString().padStart(12, '0');
+    } catch {
+      const fallback = `${Date.now()}${Math.random().toString().slice(2)}`.replace(/\D/g, '');
+      return fallback.slice(-12).padStart(12, '0');
+    }
+  }
+
+  function ensureRefScope() {
+    const pageUrl = String(location.href || '');
+    const scope = window.__wbAxRefScope;
+    if (!scope || scope.pageUrl !== pageUrl || !/^\d{12}$/.test(scope.id)) {
+      // A full navigation gets a fresh isolated world automatically. Reset on
+      // SPA route changes too so an old ref can never resolve to a new route's
+      // element with the same local traversal number.
+      window.__wbElementMap = Object.create(null);
+      window.__wbRefCounter = 0;
+      window.__wbAxTreeSnapshots = new Map();
+      window.__wbAxRefScope = { pageUrl, id: mintRefScopeId() };
+    }
+    return window.__wbAxRefScope;
+  }
+
+  function refOrdinal(refId) {
+    const scope = ensureRefScope();
+    const prefix = `ref_${scope.id}`;
+    const value = String(refId || '');
+    if (!value.startsWith(prefix)) return null;
+    const suffix = value.slice(prefix.length);
+    return /^\d+$/.test(suffix) ? Number(suffix) : null;
+  }
+
+  const MAX_NAME_LEN = 100;
+
+  // ── Role inference (matches Claude's mapping) ───────────────────────────
+  const TAG_ROLES = {
+    a: 'link',
+    button: 'button',
+    select: 'combobox',
+    textarea: 'textbox',
+    h1: 'heading', h2: 'heading', h3: 'heading',
+    h4: 'heading', h5: 'heading', h6: 'heading',
+    img: 'image',
+    nav: 'navigation',
+    main: 'main',
+    header: 'banner',
+    footer: 'contentinfo',
+    section: 'region',
+    article: 'article',
+    aside: 'complementary',
+    form: 'form',
+    table: 'table',
+    ul: 'list',
+    ol: 'list',
+    li: 'listitem',
+    label: 'label',
+  };
+
+  function isEditableRoot(el) {
+    if (!el || !el.getAttribute) return false;
+    const attr = el.getAttribute('contenteditable');
+    if (attr !== null) {
+      const normalized = String(attr).trim().toLowerCase();
+      if (normalized === '' || normalized === 'true' || normalized === 'plaintext-only') return true;
+      if (normalized === 'false') return false;
+    }
+    // isContentEditable includes inherited editability. Only surface the
+    // outer editing host so every nested span is not emitted as a textbox.
+    return el.isContentEditable === true && el.parentElement?.isContentEditable !== true;
+  }
+
+  // Some high-traffic media sites render their primary actions as plain
+  // div/span wrappers with delegated Vue event handlers. They are genuinely
+  // clickable, but expose none of the native/ARIA signals used below. Keep
+  // this list intentionally narrow and hostname-scoped so generic page
+  // containers are not promoted to buttons elsewhere.
+  const SITE_INTERACTION_RULES = {
+    bilibili: [
+      ['.video-like', '点赞'],
+      ['.video-coin', '投币'],
+      ['.video-fav', '收藏'],
+      ['.video-share', '分享'],
+      ['.follow-btn', '关注'],
+      ['.bpx-player-follow', '关注'],
+      ['.reply-box-send', '发布评论'],
+    ],
+    xiaohongshu: [
+      ['.like-wrapper', '点赞'],
+      ['.collect-wrapper', '收藏'],
+      ['.chat-wrapper', '评论'],
+      ['.share-wrapper', '分享'],
+      ['.follow-wrapper', '关注'],
+      ['.follow-btn', '关注'],
+      ['.follow-button', '关注'],
+      ['.send-btn', '发布评论'],
+      ['.publish-btn', '发布'],
+      ['.publish-button', '发布'],
+    ],
+    baiduTieba: [
+      // Match the stable action wrapper, then inspect SVG href/xlink:href via
+      // the DOM API because namespaced attribute selectors vary by engine.
+      ['.pc-pb-first-floor-interactive .action-item', '转发', '#share_pb'],
+      ['.pc-pb-first-floor-interactive .action-item', '点赞', '#agree_pb'],
+      ['.pc-pb-first-floor-interactive .action-item', '收藏', '#collect'],
+      ['.pc-pb-first-floor-interactive .more-action', '更多', '#ellipsis'],
+      ['.pc-pb-comments-desc .zan-container-dark', '赞', '#agree_comment'],
+      ['.pc-pb-comments-desc .reply-container', '回复', '#comment_comment'],
+      ['.pc-pb-comments-desc .more-action', '更多', '#ellipsis_comment'],
+      ['.follow-person-btn', '关注楼主'],
+      ['.follow-forum-btn', '关注本吧'],
+      ['.pc-pb-reply-box', '回复'],
+      ['.pc-pb-reply-box .publish-btn', '发布'],
+    ],
+  };
+
+  function currentSiteInteractionConfig() {
+    const hostname = String(location.hostname || '').toLowerCase().replace(/\.$/, '');
+    const onHost = (domain) => hostname === domain || hostname.endsWith(`.${domain}`);
+    if (onHost('bilibili.com')) return { key: 'bilibili', rules: SITE_INTERACTION_RULES.bilibili };
+    if (onHost('xiaohongshu.com')) return { key: 'xiaohongshu', rules: SITE_INTERACTION_RULES.xiaohongshu };
+    if (onHost('tieba.baidu.com')) return { key: 'baiduTieba', rules: SITE_INTERACTION_RULES.baiduTieba };
+    // LinkedIn's interop shell renders major surfaces (the post composer
+    // dialog among them) inside the open #interop-outlet shadow root. No
+    // custom interaction rules needed — piercing alone makes the dialog's
+    // contenteditable + Post button visible to the tree walk.
+    if (onHost('linkedin.com')) return { key: 'linkedin', rules: [] };
+    return { key: '', rules: [] };
+  }
+
+  function getSiteInteractionDescriptor(el) {
+    if (!el || typeof el.matches !== 'function') return null;
+    for (const [selector, label, iconHref] of currentSiteInteractionConfig().rules) {
+      try {
+        if (!el.matches(selector)) continue;
+      } catch {
+        continue;
+      }
+      if (iconHref) {
+        const hasIcon = Array.from(el.querySelectorAll?.('use') || []).some(use => (
+          use.getAttribute('href') === iconHref
+          || use.getAttribute('xlink:href') === iconHref
+        ));
+        if (!hasIcon) continue;
+      }
+      const explicit = String(
+        el.getAttribute('aria-label') || el.getAttribute('title') || ''
+      ).replace(/\s+/g, ' ').trim();
+      const rendered = String(el.innerText || el.textContent || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 80);
+      const name = explicit || (
+        rendered && rendered.includes(label) ? rendered
+          : rendered ? `${label} ${rendered}` : label
+      );
+      return { selector, label, name };
+    }
+    return null;
+  }
+
+  window.__wbSiteInteractions = Object.freeze({
+    selectors: () => currentSiteInteractionConfig().rules.map(([selector]) => selector),
+    describe: getSiteInteractionDescriptor,
+    isInteractive: (el) => !!getSiteInteractionDescriptor(el),
+    shouldPierceShadowRoots: () => ['bilibili', 'linkedin'].includes(currentSiteInteractionConfig().key),
+  });
+
+  function getRole(el) {
+    if (getSiteInteractionDescriptor(el)) return 'button';
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit;
+    if (isEditableRoot(el)) return 'textbox';
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const t = el.getAttribute('type');
+      if (t === 'submit' || t === 'button' || t === 'file') return 'button';
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      return 'textbox';
+    }
+    return TAG_ROLES[tag] || 'generic';
+  }
+
+  const NESTED_ACTION_SELECTOR = [
+    'a', 'button', 'input', 'select', 'textarea', 'details', 'summary',
+    '[onclick]', '[tabindex]', '[contenteditable]:not([contenteditable="false"])',
+    '[role="button"]', '[role="link"]', '[role="textbox"]',
+    '[role="searchbox"]', '[role="combobox"]', '[role="option"]',
+    '[role="menuitem"]', '[role="tab"]', '[role="checkbox"]', '[role="radio"]',
+  ].join(',');
+
+  function rectsOverlap(a, b) {
+    return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom;
+  }
+
+  function getVisibleDescendantText(root) {
+    const rootRect = root.getBoundingClientRect();
+    const parts = [];
+    const visit = (parent) => {
+      for (const child of parent.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          const text = String(child.textContent || '').replace(/\s+/g, ' ').trim();
+          if (text) parts.push(text);
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+        if (child.getAttribute('aria-hidden') === 'true') continue;
+        if (!isVisible(child) || !isInViewport(child)) continue;
+        if (!rectsOverlap(rootRect, child.getBoundingClientRect())) continue;
+        visit(child);
+      }
+    };
+    visit(root);
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function getFocusableGenericDescendantName(el) {
+    if (getRole(el) !== 'generic' || !el.hasAttribute('tabindex')) return '';
+    if (isEditableRoot(el)) return '';
+    try {
+      if (!isVisible(el) || el.querySelector(NESTED_ACTION_SELECTOR)) return '';
+      // Inspect each descendant instead of using innerText: browsers include
+      // opacity:0 and offscreen content in innerText, which would leak hidden
+      // picker state (or hidden prompt text) into a visible token/chip label.
+      const text = getVisibleDescendantText(el);
+      if (!text || text.length > MAX_NAME_LEN) return '';
+      return text;
+    } catch {
+      return '';
+    }
+  }
+
+  function nativeSectionPurpose(section) {
+    if (section?.tagName !== 'SECTION' || section.ownerDocument !== document || !section.isConnected
+        || (section.getAttribute('role') && section.getAttribute('role') !== 'region')) return null;
+    for (let node = section; node; node = node.parentElement || node.getRootNode?.().host) {
+      const style = getComputedStyle(node);
+      if (node.inert || node.getAttribute('aria-hidden') === 'true' || style.display === 'none'
+          || ['hidden', 'collapse'].includes(style.visibility) || Number(style.opacity) === 0
+          || style.contentVisibility === 'hidden') return null;
+    }
+    if (!isVisible(section)) return null;
+    // Native sections often use a plain caption instead of an h2/aria-label.
+    // Name only current rendered noninteractive text, never field values or
+    // text belonging to a nested entity/control. The monitor separately binds
+    // the complete section identity before certifying an action.
+    const excluded = 'button,a,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),'
+      + '[role="button"],[role="link"],[role="textbox"],[role="combobox"],[role="checkbox"],[role="radio"],'
+      + '[role="switch"],[role="tab"],[role="menuitem"],[role="slider"],[role="spinbutton"]';
+    const stack = [...section.childNodes].reverse();
+    let visited = 0;
+    while (stack.length) {
+      if (++visited > 256) return null;
+      const node = stack.pop();
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.data.replace(/\s+/g, ' ').trim(), parent = node.parentElement;
+        if (text.length >= 3 && text.length <= 512 && parent && isVisible(parent)
+            && !parent.closest(excluded)) return { text, node: parent };
+        continue;
+      }
+      if (!(node instanceof Element) || node.matches('script,style,template,section,article,aside,nav,form,dialog,'
+          + '[role="region"],[role="dialog"],[role="alertdialog"],[role="article"],[role="listitem"],'+excluded)) continue;
+      const style = getComputedStyle(node);
+      if (node.inert || node.getAttribute('aria-hidden') === 'true' || style.display === 'none'
+          || ['hidden', 'collapse'].includes(style.visibility) || Number(style.opacity) === 0
+          || style.contentVisibility === 'hidden') continue;
+      if (node.shadowRoot) return null;
+      stack.push(...[...node.childNodes].reverse());
+    }
+    return null;
+  }
+
+  // ── Signed-in account chrome ─────────────────────────────────────────────
+  // Google's shared header names its avatar button after the signed-in
+  // person ("Google Account: Jane Doe (jane@…)"), repeats the name in the
+  // avatar's alt text, and carries the current page in its continue= URL.
+  // That identifies whoever uses the browser, not the page being read, so no
+  // read may hand it to the model. The control is recognized structurally,
+  // in any interface language: a link to Google's account switch or
+  // sign-out endpoints anywhere (they name only the signed-in session), and,
+  // inside Google's bar (#gb) or a page banner, a link to the account page
+  // or a button of the bar whose name holds an e-mail address. It keeps its
+  // role and ref, so the account menu can still be opened, under a generic
+  // name. Page content is the page's own text: a link to
+  // myaccount.google.com in a mail body or article keeps its name, as do
+  // everything on Google's account pages (their subject is the account) and
+  // the signed-out "Sign in" link (ServiceLogin), which names no one.
+  const ACCOUNT_CHROME_NAME = 'Google account';
+  const GOOGLE_SESSION_ENDPOINT_PATH = /^\/(?:SignOutOptions|AccountChooser|Logout)(?:\/|$)/i;
+  const GOOGLE_ACCOUNT_PAGE_HOSTS = new Set(['accounts.google.com', 'myaccount.google.com']);
+  const PAGE_CONTENT = 'main, article, [role="main"], [role="article"]';
+  const EMAIL_ADDRESS = /[^\s@<>()[\]"',;:]+@[^\s@<>()[\]"',;:]+\.[^\s@<>()[\]"',;:]+/u;
+
+  // 'session' for Google's account switch and sign-out endpoints, 'account'
+  // for the account page, else ''.
+  function googleAccountLinkKind(href) {
+    try {
+      const url = new URL(String(href || ''), location.href);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+      const host = url.hostname.toLowerCase();
+      if (host === 'accounts.google.com' && GOOGLE_SESSION_ENDPOINT_PATH.test(url.pathname)) return 'session';
+      return host === 'myaccount.google.com' ? 'account' : '';
+    } catch {
+      return '';
+    }
+  }
+
+  // The account control itself, or the one an element sits inside.
+  function accountChromeControl(el) {
+    try {
+      if (!el?.closest || GOOGLE_ACCOUNT_PAGE_HOSTS.has(String(location.hostname).toLowerCase())) return null;
+      const link = el.closest('a[href],area[href]');
+      const kind = link ? googleAccountLinkKind(link.getAttribute('href')) : '';
+      if (kind === 'session') return link;
+      // Google's bar, or a page banner outside page content (an article's
+      // or main region's own header is content).
+      if (!el.closest('#gb') && (!el.closest('[role="banner"], header') || el.closest(PAGE_CONTENT))) return null;
+      if (kind === 'account') return link;
+      const button = el.closest('#gb button, #gb [role="button"]');
+      return button && EMAIL_ADDRESS.test(getAccessibleName(button)) ? button : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The name a model may see, of the tree's own name or of a name a tool
+  // computed for the element. Unnamed nodes stay unnamed.
+  function modelAccessibleName(el, name = getAccessibleName(el)) {
+    return name && accountChromeControl(el) ? ACCOUNT_CHROME_NAME : name;
+  }
+
+  // The href a model may see: account chrome keeps only where it leads, as
+  // its query carries the continued page and account.
+  function modelHref(el, href) {
+    if (!href || !accountChromeControl(el)) return href;
+    try {
+      const url = new URL(String(href), location.href);
+      return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin + url.pathname : href;
+    } catch {
+      return href;
+    }
+  }
+
+  // ── Accessible name (matches Claude's priority order) ───────────────────
+  function getAccessibleName(el) {
+    const tag = el.tagName.toLowerCase();
+
+    const siteInteraction = getSiteInteractionDescriptor(el);
+    if (siteInteraction) return siteInteraction.name;
+
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+
+    // aria-labelledby: look up the referenced element(s) and concatenate
+    // their text. Common on Stripe / design-system-heavy apps where the
+    // visible label lives in a sibling element.
+    const labelledby = el.getAttribute('aria-labelledby');
+    if (labelledby && labelledby.trim()) {
+      try {
+        const ids = labelledby.trim().split(/\s+/);
+        const parts = [];
+        for (const id of ids) {
+          const ref = document.getElementById(id);
+          if (ref) {
+            const t = (ref.innerText || ref.textContent || '').trim();
+            if (t) parts.push(t);
+          }
+        }
+        const joined = parts.join(' ').trim();
+        if (joined) return joined.length > MAX_NAME_LEN ? joined.substring(0, MAX_NAME_LEN) + '...' : joined;
+      } catch (e) {}
+    }
+
+    const placeholder = el.getAttribute('placeholder');
+    if (placeholder && placeholder.trim()) return placeholder.trim();
+
+    const title = el.getAttribute('title');
+    if (title && title.trim()) return title.trim();
+
+    const alt = el.getAttribute('alt');
+    if (alt && alt.trim()) return alt.trim();
+
+    if (el.id) {
+      try {
+        const byFor = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (byFor && byFor.textContent && byFor.textContent.trim()) {
+          return byFor.textContent.trim();
+        }
+      } catch {}
+    }
+
+    // Native form controls can be wrapped by a <label> without using a
+    // matching `for` attribute. `el.labels` covers both that pattern and
+    // explicit label associations, so action results do not expose an
+    // unnamed checkbox even though the page visibly labels it.
+    try {
+      const labelText = Array.from(el.labels || [])
+        .map(label => (label.innerText || label.textContent || '').replace(/\s+/g, ' ').trim())
+        .find(Boolean);
+      if (labelText) {
+        return labelText.length > MAX_NAME_LEN
+          ? labelText.substring(0, MAX_NAME_LEN) + '...'
+          : labelText;
+      }
+      const wrappingLabel = el.closest && el.closest('label');
+      const wrappingText = (wrappingLabel?.innerText || wrappingLabel?.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (wrappingText) {
+        return wrappingText.length > MAX_NAME_LEN
+          ? wrappingText.substring(0, MAX_NAME_LEN) + '...'
+          : wrappingText;
+      }
+    } catch {}
+
+    // A native select's accessible name is its associated field label. Only
+    // fall back to the selected option when the control has no label; the
+    // selected option is emitted separately as its current value.
+    if (tag === 'select') {
+      const opt = (el.options && el.options[el.selectedIndex]) || el.querySelector('option[selected]');
+      if (opt && opt.textContent && opt.textContent.trim()) {
+        return opt.textContent.trim();
+      }
+    }
+
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || '').toLowerCase();
+      const valAttr = el.getAttribute('value');
+      // Only submit/button/reset use the value as the accessible name — those
+      // are clickable buttons where the value IS the label. For text-like
+      // inputs we must NOT return el.value, because then a `<input type="text"
+      // value="1">` renders in the tree as `textbox "1"`, which looks to the
+      // model like a button labeled "1" rather than a text field currently
+      // holding "1". formatLine emits the current value separately as a
+      // `value="..."` attribute.
+      if ((t === 'submit' || t === 'button' || t === 'reset')
+          && valAttr && valAttr.trim()) return valAttr.trim();
+    }
+
+    // Button/link/summary: prefer direct text children, but fall back to the
+    // full innerText when the visible label is buried in nested spans/svgs
+    // (common in Stripe/Radix/headless-UI — e.g. a "month(s)" picker trigger
+    // wraps its text in <span><span>month(s)</span></span>).
+    if (tag === 'button' || tag === 'a' || tag === 'summary') {
+      let text = '';
+      for (const child of el.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) text += child.textContent;
+      }
+      if (text.trim()) return text.trim();
+      const deep = (el.innerText || el.textContent || '').trim();
+      if (deep) return deep.length > MAX_NAME_LEN ? deep.substring(0, MAX_NAME_LEN) + '...' : deep;
+    }
+
+    if (/^h[1-6]$/.test(tag)) {
+      const s = el.textContent;
+      if (s && s.trim()) return s.trim().substring(0, MAX_NAME_LEN);
+    }
+
+    // Images without alt get no name (alt was already handled above).
+    if (tag === 'img') return '';
+
+    // For list/menu items and similar pickable nodes, the visible label is
+    // almost always inside nested markup (Stripe wraps currency option
+    // labels in child spans — "direct text children only" returns empty,
+    // which left the model staring at `option [ref_187]` with no clue what
+    // currency it was). Use innerText for these roles so the model sees the
+    // actual labels.
+    const roleAttr = (el.getAttribute('role') || '').toLowerCase();
+    const LABEL_FROM_DESCENDANTS_ROLES = new Set([
+      'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+      'tab', 'treeitem', 'row', 'gridcell', 'cell', 'listitem',
+    ]);
+    if (LABEL_FROM_DESCENDANTS_ROLES.has(roleAttr) || tag === 'li') {
+      const s = (el.innerText || el.textContent || '').trim();
+      if (s) return s.length > MAX_NAME_LEN ? s.substring(0, MAX_NAME_LEN) + '...' : s;
+    }
+
+    // Tokenized inputs often replace their real textbox/combobox with a
+    // focusable generic wrapper once a value is selected. Gmail recipient
+    // chips are one example: the visible contact label lives in a nested
+    // span while the actual "To recipients" input becomes 0x0. Preserve the
+    // short visible label only for leaf-like wrappers so large composite
+    // containers do not absorb all of their descendants' text.
+    const focusableGenericName = getFocusableGenericDescendantName(el);
+    if (focusableGenericName) return focusableGenericName;
+
+    // Form fields without an explicit label (aria-label, aria-labelledby,
+    // placeholder, title, <label for>) often sit next to a small text node or
+    // sibling like "Every" / "Price" / "Quantity". Look at the immediate
+    // previous sibling (and its parent's preceding text/label) for a short
+    // label — without this, Stripe's "Every [1] month(s)" custom-interval
+    // input renders as a bare textbox and the model can't tell what it's for.
+    if (tag === 'input' || tag === 'textarea' || tag === 'select'
+        || roleAttr === 'textbox' || roleAttr === 'searchbox'
+        || roleAttr === 'spinbutton' || roleAttr === 'combobox') {
+      try {
+        const tryText = (node) => {
+          if (!node) return '';
+          if (node.nodeType === Node.TEXT_NODE) return (node.textContent || '').trim();
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const t = (node.innerText || node.textContent || '').trim();
+            if (t && t.length <= 60) return t;
+          }
+          return '';
+        };
+        let sib = el.previousSibling;
+        for (let i = 0; i < 4 && sib; i++, sib = sib.previousSibling) {
+          const t = tryText(sib);
+          if (t) return t.length > MAX_NAME_LEN ? t.substring(0, MAX_NAME_LEN) + '...' : t;
+        }
+        // Parent-level previous sibling: handles layouts like
+        // <div>Every</div><div><input/></div>.
+        const parent = el.parentElement;
+        if (parent) {
+          let psib = parent.previousSibling;
+          for (let i = 0; i < 3 && psib; i++, psib = psib.previousSibling) {
+            const t = tryText(psib);
+            if (t) return t.length > MAX_NAME_LEN ? t.substring(0, MAX_NAME_LEN) + '...' : t;
+          }
+        }
+      } catch {}
+    }
+
+    if (tag === 'section') {
+      const purpose = nativeSectionPurpose(el);
+      if (purpose) return purpose.text.length > MAX_NAME_LEN ? purpose.text.slice(0, MAX_NAME_LEN) + '...' : purpose.text;
+    }
+
+    // Fallback: direct text children only, at least 3 chars.
+    let text = '';
+    for (const child of el.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) text += child.textContent;
+    }
+    if (text.trim() && text.trim().length >= 3) {
+      const v = text.trim();
+      return v.length > MAX_NAME_LEN ? v.substring(0, MAX_NAME_LEN) + '...' : v;
+    }
+    return '';
+  }
+
+  // ── Visibility ──────────────────────────────────────────────────────────
+  function isVisible(el) {
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none') return false;
+    if (cs.visibility === 'hidden') return false;
+    if (cs.opacity === '0') return false;
+    if (el.offsetWidth <= 0 || el.offsetHeight <= 0) return false;
+    return true;
+  }
+
+  function isRenderedDropdownMenu(el) {
+    if (!el?.isConnected || el.getClientRects().length === 0) return false;
+    for (let node = el; node instanceof Element; node = node.parentElement) {
+      const style = window.getComputedStyle(node);
+      if (node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true'
+          || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || Number(style.opacity) === 0 || style.contentVisibility === 'hidden') return false;
+    }
+    return true;
+  }
+
+  // A checkbox, radio, select, or file input is routinely made transparent or
+  // clipped and driven through a visible label or wrapper. Such a control is
+  // still operable by set_checked or by activating its label, so it is not
+  // hidden in the sense a conditional or honeypot field is.
+  function _axGroupLabelledByText(el) {
+    try {
+      const ids = String(el.getAttribute('aria-labelledby') || '').trim();
+      if (!ids) return '';
+      const root = el.getRootNode && el.getRootNode() || document;
+      return ids.split(/\s+/)
+        .map(id => (root.getElementById && root.getElementById(id)) || document.getElementById(id))
+        .filter(Boolean)
+        .map(node => node.innerText || node.textContent || '')
+        .join(' ');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function isLabelDrivenControl(el) {
+    const tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (tag === 'select') return true;
+    if (tag !== 'input') return false;
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    return type === 'checkbox' || type === 'radio' || type === 'file';
+  }
+
+  function hasVisibleControlActivator(el) {
+    try {
+      const id = el.getAttribute('id');
+      if (id) {
+        const escaped = window.CSS && CSS.escape ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+        const root = el.getRootNode && el.getRootNode() || document;
+        const label = (root.querySelector && root.querySelector('label[for="' + escaped + '"]'))
+          || document.querySelector('label[for="' + escaped + '"]');
+        if (label && isVisible(label)) return true;
+      }
+      const wrapping = el.closest && el.closest('label');
+      if (wrapping && isVisible(wrapping)) return true;
+      // An ordinary container is not an activator. A custom control wraps its
+      // input in a label or in something that carries the control's own role,
+      // and that is what a click can actually drive.
+      const ACTIVATOR_ROLES = [
+        'checkbox', 'radio', 'switch', 'button', 'option',
+        'menuitemcheckbox', 'menuitemradio', 'combobox', 'listbox',
+      ];
+      let parent = el.parentElement;
+      for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
+        const parentTag = parent.tagName ? parent.tagName.toLowerCase() : '';
+        const parentRole = String(
+          (parent.getAttribute && parent.getAttribute('role')) || '',
+        ).toLowerCase();
+        const activates = parentTag === 'label'
+          || parentTag === 'button'
+          || ACTIVATOR_ROLES.includes(parentRole);
+        if (activates && isVisible(parent)) return true;
+      }
+    } catch (e) { /* fall through */ }
+    return false;
+  }
+
+  function isInViewport(el) {
+    const r = el.getBoundingClientRect();
+    return r.top < window.innerHeight && r.bottom > 0 && r.left < window.innerWidth && r.right > 0;
+  }
+
+  // ── Interactivity / landmark checks ─────────────────────────────────────
+  const INTERACTIVE_TAGS = new Set(['a', 'button', 'input', 'select', 'textarea', 'details', 'summary']);
+  const LANDMARK_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'nav', 'main', 'header', 'footer', 'section', 'article', 'aside']);
+
+  function isInteractive(el) {
+    const tag = el.tagName.toLowerCase();
+    if (INTERACTIVE_TAGS.has(tag)) return true;
+    if (getSiteInteractionDescriptor(el)) return true;
+    if (el.getAttribute('onclick') !== null) return true;
+    if (el.getAttribute('tabindex') !== null) return true;
+    const role = el.getAttribute('role');
+    if (role === 'button' || role === 'link') return true;
+    if (isEditableRoot(el)) return true;
+    return false;
+  }
+
+  function composedParent(node) {
+    if (!node) return null;
+    if (node.assignedSlot) return node.assignedSlot;
+    const parent = node.parentNode;
+    if (parent) {
+      return (typeof ShadowRoot !== 'undefined' && parent instanceof ShadowRoot)
+        ? parent.host
+        : parent;
+    }
+    const root = node.getRootNode?.();
+    return (typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot)
+      ? root.host
+      : null;
+  }
+
+  function isComposedAncestor(ancestor, node) {
+    for (let current = node; current; current = composedParent(current)) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  }
+
+  let treeHiddenStateCache = null;
+  function isHiddenTreeNode(el) {
+    const cache = treeHiddenStateCache || new WeakMap();
+    const pending = [];
+    let node = el;
+    for (; node?.nodeType === Node.ELEMENT_NODE && !cache.has(node); node = composedParent(node)) pending.push(node);
+    let suppressed = cache.get(node)?.suppressed === true;
+    let transparent = cache.get(node)?.transparent === true;
+    while (pending.length) {
+      const current = pending.pop();
+      const style = window.getComputedStyle(current);
+      const generatesBox = style.display !== 'contents';
+      suppressed ||= current.getAttribute('aria-hidden') === 'true'
+        || style.display === 'none' || (generatesBox && style.contentVisibility === 'hidden');
+      // Top-layer boxes escape ancestor opacity, but not display/content
+      // suppression or aria-hidden. Their own opacity still applies.
+      if (transparent && (current.matches(':modal')
+          || (current.hasAttribute('popover') && 'popover' in current && current.matches(':popover-open'))
+          || current.matches(':fullscreen'))) transparent = false;
+      // Box effects on display:contents do not affect its rendered children.
+      transparent ||= generatesBox && style.opacity === '0';
+      // Visibility can be restored by a child. Cache the inherited states
+      // separately so siblings and anchored reads keep the same semantics.
+      cache.set(current, { suppressed, transparent, hidden: suppressed || transparent || ['hidden', 'collapse'].includes(style.visibility) });
+    }
+    // Offscreen text, display:contents and CSS overrides of [hidden] render.
+    return cache.get(el)?.hidden === true;
+  }
+
+  function deepestOpenShadowHit(x, y) {
+    let hit = document.elementFromPoint(x, y);
+    const seen = new Set();
+    while (hit?.shadowRoot?.mode === 'open' && !seen.has(hit)) {
+      seen.add(hit);
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
+  }
+
+  function isNodeOccluded(el) {
+    if (!el || !el.isConnected || el.nodeType !== Node.ELEMENT_NODE) return false;
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return false;
+      const vw = window.innerWidth || 800;
+      const vh = window.innerHeight || 600;
+      if (r.top >= vh || r.bottom <= 0 || r.left >= vw || r.right <= 0) return false;
+
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      if (cx >= 0 && cx <= vw && cy >= 0 && cy <= vh) {
+        const hit = deepestOpenShadowHit(cx, cy);
+        if (hit && isComposedAncestor(el, hit)) return false;
+      }
+
+      const sampleOffsets = [
+        [cx, Math.round(r.top + Math.max(2, Math.min(8, r.height * 0.2)))],
+        [cx, Math.round(r.bottom - Math.max(2, Math.min(8, r.height * 0.2)))],
+        [Math.round(r.left + Math.max(2, Math.min(8, r.width * 0.2))), cy],
+        [Math.round(r.right - Math.max(2, Math.min(8, r.width * 0.2))), cy],
+      ];
+      for (const [sx, sy] of sampleOffsets) {
+        if (sx < 0 || sy < 0 || sx > vw || sy > vh) continue;
+        const sampleHit = deepestOpenShadowHit(sx, sy);
+        if (sampleHit && isComposedAncestor(el, sampleHit)) {
+          return false;
+        }
+      }
+
+      if (document.elementsFromPoint && cx >= 0 && cx <= vw && cy >= 0 && cy <= vh) {
+        const elements = document.elementsFromPoint(cx, cy);
+        const targetIdx = elements.indexOf(el);
+        if (targetIdx > 0) {
+          const allAboveNone = elements.slice(0, targetIdx).every(item => {
+            try {
+              const pe = window.getComputedStyle(item).pointerEvents;
+              return pe === 'none' || isComposedAncestor(el, item);
+            } catch {
+              return false;
+            }
+          });
+          if (allAboveNone) return false;
+        }
+      }
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function visualTargetEligibility(el) {
+    const tag = el.tagName?.toLowerCase() || '';
+    if (tag === 'button') return 'semantic-button';
+    if (['canvas', 'iframe', 'label', 'input', 'textarea', 'select'].includes(tag)) {
+      return 'coordinate-only';
+    }
+    return isInteractive(el) ? 'coordinate-only' : '';
+  }
+
+  function resolveVisualTargetAtPoint(x, y) {
+    const cssX = Number(x);
+    const cssY = Number(y);
+    if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return null;
+
+    for (let el = deepestOpenShadowHit(cssX, cssY); el; el = composedParent(el)) {
+      if (el.nodeType !== Node.ELEMENT_NODE) continue;
+      const eligibility = visualTargetEligibility(el);
+      if (!eligibility) continue;
+      return {
+        ref_id: getOrMintRef(el),
+        role: getRole(el),
+        name: (modelAccessibleName(el) || '').slice(0, 160),
+        eligibility,
+      };
+    }
+    return null;
+  }
+
+  function isLandmark(el) {
+    if (LANDMARK_TAGS.has(el.tagName.toLowerCase())) return true;
+    return el.getAttribute('role') !== null;
+  }
+
+  // ── Skip tags ──────────────────────────────────────────────────────────
+  const SKIP_TAGS = new Set(['script', 'style', 'meta', 'link', 'title', 'noscript']);
+
+  // Roles worth keeping in 'visible' filter even when non-interactive.
+  // A dialog/listbox/menu is important structural context; a generic span
+  // with an accessible name usually isn't.
+  const USEFUL_NON_INTERACTIVE_ROLES = new Set([
+    'dialog', 'alertdialog', 'alert', 'status',
+    'listbox', 'menu', 'menubar', 'tablist', 'radiogroup',
+    'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab',
+    'combobox', 'textbox', 'searchbox',
+    'heading', 'form', 'main', 'navigation', 'banner', 'contentinfo', 'region', 'complementary',
+    'progressbar', 'slider', 'spinbutton',
+  ]);
+
+  /**
+   * Should this element be INCLUDED in the output? (Its children are still
+   * walked regardless — they bubble up to the parent's depth if this node
+   * is skipped.)
+   */
+  function shouldInclude(el, opts) {
+    const tag = el.tagName.toLowerCase();
+    if (SKIP_TAGS.has(tag)) return false;
+
+    if (opts.filter !== 'all' && el.getAttribute('aria-hidden') === 'true') return false;
+    if (opts.filter !== 'all' && !isVisible(el)) return false;
+
+    // The 'visible' default restricts to in-viewport elements, UNLESS we're
+    // anchored at a specific refId (then we want the whole subtree).
+    if (opts.filter !== 'all' && !opts.refId) {
+      if (!isInViewport(el)) return false;
+    }
+
+    if (opts.filter === 'interactive') return isInteractive(el);
+
+    const role = getRole(el);
+
+    if (opts.filter === 'visible') {
+      // Tight mode for agent consumption: only keep nodes the model can
+      // actually ACT on or needs as structural context. Plain spans/divs
+      // with an accessible name were the main bloat source on complex
+      // apps (Stripe, Notion, etc.) and are almost never the right click
+      // target — the interactive ancestor is.
+      if (isInteractive(el)) return true;
+      if (/^h[1-6]$/.test(el.tagName.toLowerCase())) return true;
+      if (USEFUL_NON_INTERACTIVE_ROLES.has(role)) return true;
+      return false;
+    }
+
+    // opts.filter === 'all' — keep the older, more generous behavior.
+    if (isInteractive(el)) return true;
+    if (isLandmark(el)) return true;
+    if (getAccessibleName(el).length > 0) return true;
+    return role !== null && role !== 'generic' && role !== 'image';
+  }
+
+  // ── Ref_id management ───────────────────────────────────────────────────
+  //
+  // Elements keep the same ref_id across calls on one document route. The
+  // numeric scope prefix changes across documents and SPA routes, so a local
+  // ref counter restart can never alias a target from an older page.
+  function getOrMintRef(el) {
+    const prefix = `ref_${ensureRefScope().id}`;
+    for (const key in window.__wbElementMap) {
+      if (window.__wbElementMap[key].deref() === el) return key;
+    }
+    const key = prefix + (++window.__wbRefCounter);
+    window.__wbElementMap[key] = new WeakRef(el);
+    return key;
+  }
+
+  function sweepDeadRefs() {
+    for (const key in window.__wbElementMap) {
+      if (!window.__wbElementMap[key].deref()) {
+        delete window.__wbElementMap[key];
+      }
+    }
+  }
+
+
+  // Internal Jev inventory is collected by the existing AX walker. It never
+  // parses page-authored ref strings and cannot target frames or shadow roots.
+  let jevCollector = null;
+  let lastJevSnapshot = null;
+  let jevSensitiveControlSeen = false;
+  function jevControl(el) {
+    if (window.top !== window || el.getRootNode() !== document || !isInteractive(el)) return null;
+    const tag = el.tagName.toLowerCase();
+    const type = String(el.type || '').toLowerCase();
+    const name = String(modelAccessibleName(el) || '').slice(0, 120);
+    const identity = [name, el.name, el.id, el.autocomplete].join(' ');
+    if (['password', 'file', 'hidden'].includes(type)
+        || /\b(?:password|passwd|passcode|pin|otp|token|secret|cvv|cvc|csc|ssn|iban)\b|\bcc-(?:name|given-name|additional-name|family-name|number|exp|exp-month|exp-year|csc|type)\b|api.?key|one[-_\s]?time(?:[-_\s]?code)?|verification.?code|security.?code|auth(?:entication)?.?code|credit.?card|card.?number|social.?security|(?:routing|account).?number/i.test(identity)) {
+      jevSensitiveControlSeen = true;
+      return null;
+    }
+    const role = getRole(el);
+    const kinds = [];
+    if (tag === 'select') kinds.push('select');
+    else if (type === 'checkbox' || role === 'checkbox' || role === 'switch') kinds.push('check');
+    else if ((tag === 'input' && !['submit', 'button', 'reset', 'image', 'radio', 'range', 'color'].includes(type)) || tag === 'textarea') kinds.push('fill');
+    else if (['button', 'a', 'option'].includes(tag) || ['button', 'link', 'option', 'menuitem', 'tab', 'radio'].includes(role)) kinds.push('click');
+    if (!kinds.length) return null;
+    const disabled = !!el.disabled || el.getAttribute('aria-disabled') === 'true' || !!el.readOnly;
+    const control = { ref: getOrMintRef(el), role, name, kinds, disabled,
+      form: el.form ? getOrMintRef(el.form) : '',
+      value: kinds.includes('fill') ? String(el.value || '').slice(0, 500) : '',
+      checked: kinds.includes('check') ? (el.checked === true || el.getAttribute('aria-checked') === 'true') : null,
+      options: tag === 'select' ? Array.from(el.options).filter(o => !o.disabled).slice(0, 20).map(o => ({ value: o.value, label: o.text.slice(0, 100) })) : [],
+    };
+    // The signature remains internal. A changed destination or field identity
+    // invalidates a selected target even if its DOM node/ref survived.
+    control.signature = fingerprintTreeContent(JSON.stringify({ ...control, id: el.id, fieldName: el.name, href: el.getAttribute('href'), type }));
+    return control;
+  }
+  function collectJevControl(el) {
+    if (!jevCollector) return;
+    try {
+      const control = jevControl(el);
+      if (control && jevCollector.size < 24) jevCollector.set(control.ref, control);
+    } catch { /* Optional inventory must not break the normal AX reader. */ }
+  }
+  function jevSnapshot() { return lastJevSnapshot; }
+  function jevValidate(binding) {
+    if (!binding || binding.pageUrl !== location.href) return false;
+    generateAccessibilityTree('interactive', 10, 3500);
+    const snapshot = lastJevSnapshot;
+    if (!snapshot || snapshot.hasSensitiveControls === true || snapshot.structure !== binding.structure) return false;
+    const target = snapshot.controls.find(c => c.ref === binding.ref);
+    const el = lookup(binding.ref);
+    if (!target || target.disabled || target.signature !== binding.signature || !el || el.getRootNode() !== document) return false;
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+    if (rect.width <= 0 || rect.height <= 0 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+    const hit = document.elementFromPoint(x, y);
+    return hit === el || el.contains(hit);
+  }
+
+  // ── Line formatting ────────────────────────────────────────────────────
+  function formatLine(el, depth, origin = null) {
+    const role = getRole(el);
+    let name = modelAccessibleName(el);
+    const ref = getOrMintRef(el);
+    if (origin) origin.ref = ref;
+    const tag = el.tagName.toLowerCase();
+
+    let line = ' '.repeat(depth) + role;
+    if (name) {
+      name = name.replace(/\s+/g, ' ').substring(0, MAX_NAME_LEN).replace(/"/g, '\\"');
+      line += ' "' + name + '"';
+    }
+    line += ' [' + ref + ']';
+
+    const href = el.getAttribute('href');
+    // Tracking URLs can occupy an entire tree chunk before any result appears.
+    // Keep the live href on the element/ref; never present a shortened URL as
+    // a navigable href. The agent can click the ref and read the final URL.
+    // Account chrome keeps only where it leads (modelHref).
+    if (href) line += formatTreeHref(modelHref(el, href));
+    const type = el.getAttribute('type');
+    if (type) line += ' type="' + type + '"';
+    // A React-style form can replace a control node on every change, which
+    // mints a new ref for the same logical field. The app-owned id and name
+    // survive that, so a form inventory can key on them instead of the ref.
+    {
+      const encodeIdentity = value => String(value || '')
+        .replace(/\s+/g, ' ').trim().substring(0, 160)
+        .replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const domId = encodeIdentity(el.getAttribute('id'));
+      const fieldName = encodeIdentity(el.getAttribute('name'));
+      if (domId) line += ' dom_id="' + domId + '"';
+      if (fieldName) line += ' field_name="' + fieldName + '"';
+    }
+    const ph = el.getAttribute('placeholder');
+    if (ph) line += ' placeholder="' + ph + '"';
+
+    // Disabled submit/action state is a blocker the model must see before it
+    // tries to activate a control. In particular, React editors can contain
+    // visually correct DOM text while their application state still leaves
+    // the associated Post/Send button aria-disabled.
+    let disabled = false;
+    try {
+      disabled = !!el.disabled
+        || el.getAttribute('aria-disabled') === 'true'
+        || el.matches(':disabled');
+    } catch {}
+    if (disabled) line += ' disabled=true';
+
+    // Checkbox/radio state is an action-critical value, not decorative
+    // metadata. Without it the model has to infer state from a focus ring or
+    // screenshot and can accidentally toggle a control back off.
+    const inputType = tag === 'input'
+      ? (el.getAttribute('type') || 'text').toLowerCase()
+      : '';
+    const attrRole = (el.getAttribute('role') || '').toLowerCase();
+    const inventoryRole = (role || attrRole || '').toLowerCase();
+    const isInventoryFormControl = tag === 'textarea' || tag === 'select'
+      || (tag === 'input' && !['submit', 'button', 'reset', 'image', 'hidden'].includes(inputType))
+      || isEditableRoot(el)
+      || ['textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'listbox'].includes(inventoryRole);
+    if (isInventoryFormControl) {
+      try {
+        const ariaRequired = String(el.getAttribute('aria-required') || '').trim().toLowerCase();
+        // HTML answers this for a native control: an optional input, textarea,
+        // or select reports required === false while carrying no attribute at
+        // all. Only a custom ARIA control can leave the answer unknown.
+        const nativeControl = tag === 'input' || tag === 'textarea' || tag === 'select';
+        if (el.required === true || ariaRequired === 'true') line += ' required=true';
+        else if (ariaRequired === 'false' || (nativeControl && el.required === false)) line += ' required=false';
+      } catch {}
+      // A readonly control is excluded from constraint validation and cannot
+      // take the mutation a processed row needs, so the inventory has to know.
+      try {
+        if (el.readOnly === true || el.getAttribute('aria-readonly') === 'true') {
+          line += ' readonly=true';
+        }
+      } catch {}
+      // A custom radio group carries no HTML name, so nothing else says which
+      // options are alternatives to each other.
+      try {
+        if (inventoryRole === 'radio' && !el.getAttribute('name')) {
+          const group = el.closest('[role="radiogroup"]');
+          const groupIdentity = group
+            ? String(
+              group.getAttribute('id')
+              || group.getAttribute('aria-label')
+              || _axGroupLabelledByText(group)
+              || '',
+            ).replace(/\s+/g, ' ').trim().substring(0, 160)
+              .replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+            : '';
+          if (groupIdentity) line += ' group="' + groupIdentity + '"';
+        }
+      } catch {}
+      // filter=all deliberately keeps aria-hidden and invisible nodes, which
+      // pulls conditional and honeypot inputs into the tree. Mark them so a
+      // form inventory can leave out controls the user was never shown and
+      // cannot act on. Under the other filters these are already excluded.
+      // A control that is merely transparent or clipped behind a visible label
+      // or wrapper is a custom control, not a hidden field, so it stays.
+      try {
+        const style = window.getComputedStyle(el);
+        const notRendered = style.display === 'none' || style.visibility === 'hidden';
+        const ariaHidden = el.getAttribute('aria-hidden') === 'true'
+          || !!el.closest('[aria-hidden="true"]');
+        const visuallyReplaced = !notRendered
+          && isLabelDrivenControl(el)
+          && hasVisibleControlActivator(el);
+        if (ariaHidden || notRendered || (!isVisible(el) && !visuallyReplaced)) {
+          line += ' hidden=true';
+        }
+      } catch {}
+    } else {
+      // filter=all keeps inactive status/error templates as well as controls.
+      // Without this marker their text can be mistaken for a live outcome.
+      try {
+        if (isHiddenTreeNode(el)) line += ' hidden=true';
+      } catch {}
+    }
+    try {
+      if (isInteractive(el) && isNodeOccluded(el)) {
+        line += ' occluded=true';
+      }
+    } catch {}
+    if (inputType === 'checkbox' || inputType === 'radio') {
+      line += ` checked=${el.checked ? 'true' : 'false'}`;
+    } else if (['checkbox', 'radio', 'switch'].includes(attrRole) || el.hasAttribute('aria-checked')) {
+      const ariaChecked = el.getAttribute('aria-checked');
+      if (ariaChecked != null) line += ` checked=${ariaChecked}`;
+    }
+
+    // Surface the current value for text-like inputs/textareas so the model
+    // can see what's already filled in. Skipped for submit/button/reset/file
+    // (value is the label there) and checkboxes/radios. Always emit even when
+    // the value equals the accessible name so inventory verification can
+    // read it back; the model-facing cap is 60 characters plus '...'.
+    // Truncated values also emit value_len and value_fp so verification can
+    // bind the full app-owned string without putting it in the tree.
+    const AX_VALUE_MAX_LEN = 60;
+    const axInventoryValue = (raw) => {
+      let text = String(raw ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+      try { text = text.normalize('NFKC'); } catch { /* ignore */ }
+      return text.trim();
+    };
+    const axValueFingerprint = (text) => {
+      let hash = 0x811c9dc5;
+      const value = String(text || '');
+      for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      return hash.toString(16).padStart(8, '0');
+    };
+    const appendAxValue = (current, raw) => {
+      const v = axInventoryValue(raw);
+      if (!v) return current;
+      const truncated = v.length > AX_VALUE_MAX_LEN;
+      const trimmed = truncated ? v.substring(0, AX_VALUE_MAX_LEN) + '...' : v;
+      const escaped = trimmed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      current += ' value="' + escaped + '"';
+      if (truncated) {
+        current += ' value_len=' + v.length;
+        current += ' value_fp=' + axValueFingerprint(v);
+      }
+      return current;
+    };
+    if (tag === 'input' || tag === 'textarea') {
+      const skipValueTypes = new Set(['submit', 'button', 'reset', 'file', 'checkbox', 'radio', 'image', 'hidden', 'color', 'range', 'password']);
+      if (!skipValueTypes.has(inputType)) {
+        line = appendAxValue(line, el.value == null ? '' : String(el.value));
+      }
+    } else if (isEditableRoot(el)) {
+      line = appendAxValue(line, String(el.innerText || el.textContent || '').replace(/\s+/g, ' '));
+    } else if (tag === 'select' || ['combobox', 'listbox'].includes(attrRole)) {
+      let v = '';
+      if (tag === 'select') {
+        const selected = (el.options && el.options[el.selectedIndex])
+          || el.querySelector('option[selected]');
+        v = String(selected?.textContent || '').replace(/\s+/g, ' ').trim();
+      } else {
+        v = String(
+          el.getAttribute('aria-valuetext')
+          || el.getAttribute('aria-valuenow')
+          || (el.value == null ? '' : el.value),
+        ).replace(/\s+/g, ' ').trim();
+        if (!v) {
+          let selected = null;
+          try {
+            selected = el.querySelector('[aria-selected="true"],[role="option"][data-selected="true"]');
+          } catch {}
+          v = String(selected?.innerText || selected?.textContent || '').replace(/\s+/g, ' ').trim();
+        }
+        if (!v) v = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      line = appendAxValue(line, v);
+    }
+
+    return line;
+  }
+
+  function formatOption(opt, depth, origin = null) {
+    const ref = getOrMintRef(opt);
+    if (origin) origin.ref = ref;
+    const rawName = opt.textContent ? opt.textContent.trim() : '';
+    const name = rawName.replace(/\s+/g, ' ').substring(0, MAX_NAME_LEN).replace(/"/g, '\\"');
+    let line = ' '.repeat(depth) + 'option';
+    if (name) line += ' "' + name + '"';
+    line += ' [' + ref + ']';
+    if (opt.selected) line += ' (selected)';
+    if (opt.value && opt.value !== rawName) {
+      line += ' value="' + opt.value.replace(/"/g, '\\"') + '"';
+    }
+    return line;
+  }
+
+  // Formatter-owned origins stay private: page text may contain real ref
+  // tokens in names, roles or attributes, so text matching is not authority.
+  const treeLineOrigins = new WeakMap();
+  const TREE_REF_ORIGIN = Symbol('formatter-owned-AX-refs');
+  function pushTreeLine(lines, node, depth, offscreen = false, option = false) {
+    const origin = {};
+    const text = option ? formatOption(node, depth, origin) : formatLine(node, depth, origin);
+    const records = treeLineOrigins.get(lines) || [];
+    records.push({ index: lines.length, ref: origin.ref, node: new WeakRef(node) });
+    treeLineOrigins.set(lines, records);
+    lines.push(text + (offscreen && !isInViewport(node) ? ' offscreen=true' : ''));
+  }
+  function formatterRefs(lines, start = 0, end = lines.length, prefixLength = 0) {
+    const records = new Map((treeLineOrigins.get(lines) || []).map(record => [record.index, record]));
+    const refs = [];
+    let offset = prefixLength;
+    for (let index = start; index < end; index++) {
+      const record = records.get(index);
+      if (record) refs.push(Object.freeze({ ref: record.ref, node: record.node, end: offset + lines[index].length }));
+      offset += lines[index].length + 1;
+    }
+    return refs;
+  }
+  function withFormatterRefs(result, lines, start = 0, end = lines.length, prefixLength = 0) {
+    // Enumerable Symbols survive our object spreads but are omitted by JSON
+    // and runtime message serialization. No values or nodes enter public output.
+    result[TREE_REF_ORIGIN] = Object.freeze({ text: result.pageContent,
+      refs: Object.freeze(formatterRefs(lines, start, end, prefixLength)) });
+    return result;
+  }
+  function observedTreeRefs(tree, visibleLength = tree?.pageContent?.length) {
+    const origin = tree?.[TREE_REF_ORIGIN];
+    if (!origin || origin.text !== tree.pageContent || !Number.isSafeInteger(visibleLength)
+        || visibleLength < 0 || visibleLength > origin.text.length) return [];
+    return origin.refs.filter(record => record.end <= visibleLength
+      && record.node.deref() === lookup(record.ref)).map(({ ref, end }) => ({ ref, end }));
+  }
+
+  // ── Walker ─────────────────────────────────────────────────────────────
+  function nodeHasWalkableChildren(el) {
+    if (!el) return false;
+    if (el.children && el.children.length) return true;
+    try {
+      return !!(window.__wbSiteInteractions.shouldPierceShadowRoots()
+        && el.shadowRoot
+        && el.shadowRoot.children
+        && el.shadowRoot.children.length);
+    } catch {
+      return false;
+    }
+  }
+
+  function pushWalkableChildren(el, stack) {
+    for (const child of el.children || []) stack.push(child);
+    try {
+      if (window.__wbSiteInteractions.shouldPierceShadowRoots() && el.shadowRoot) {
+        for (const child of el.shadowRoot.children || []) stack.push(child);
+      }
+    } catch {}
+  }
+
+  // depthTruncated is form-relevant: set it only if an omitted descendant
+  // would have been included. Decorative wrappers at the depth cap stay silent.
+  function omittedDescendantWouldBeIncluded(el, opts) {
+    const stack = [];
+    pushWalkableChildren(el, stack);
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || !node.tagName) continue;
+      if (opts._skipPrioritySet && opts._skipPrioritySet.has(node)) continue;
+      if (opts._skipOverlaySet && opts._skipOverlaySet.has(node)) continue;
+      if (shouldInclude(node, opts)) return true;
+      pushWalkableChildren(node, stack);
+    }
+    return false;
+  }
+
+  function walk(el, depth, opts, lines, hoistedRoot = false) {
+    if (!el || !el.tagName) return;
+    // A native popup may hide through a parent transition while its buttons
+    // retain their own rects. Do not leak its hidden options into visible AX.
+    if (opts.filter !== 'all' && el.matches?.('.dropdown-menu') && !isRenderedDropdownMenu(el)) return;
+
+    // Skip nodes already emitted in the priority/action prelude.
+    if (depth > 0 && opts._skipPrioritySet && opts._skipPrioritySet.has(el)) return;
+
+    // Skip nodes already emitted in the hoisted-overlay prelude. An
+    // unlabelled wrapper can still be at depth 0 during the body walk.
+    if (!hoistedRoot && opts._skipOverlaySet && opts._skipOverlaySet.has(el)) return;
+
+    if (depth > opts.maxDepth) {
+      if (shouldInclude(el, opts) || omittedDescendantWouldBeIncluded(el, opts)) {
+        opts.depthTruncated = true;
+      }
+      return;
+    }
+
+    // An element anchored via refId is always included at depth 0, even if
+    // it wouldn't normally pass the include filter.
+    const included = shouldInclude(el, opts) || (opts.refId != null && depth === 0);
+
+    if (included && !opts._emittedRefs?.has(getOrMintRef(el))) {
+      opts._emittedRefs?.add(getOrMintRef(el));
+      opts._onIncluded?.(el);
+      pushTreeLine(lines, el, depth, opts._markOffscreen);
+
+      if (el.tagName.toLowerCase() === 'select' && el.options) {
+        for (const opt of el.options) {
+          if (opts._emittedRefs?.has(getOrMintRef(opt))) continue;
+          opts._emittedRefs?.add(getOrMintRef(opt));
+          pushTreeLine(lines, opt, depth + 1, false, true);
+        }
+      }
+    }
+
+    if (nodeHasWalkableChildren(el) && depth < opts.maxDepth) {
+      const nextDepth = included ? depth + 1 : depth;
+      for (const child of el.children || []) {
+        walk(child, nextDepth, opts, lines);
+      }
+      // Bilibili's current comment system is a hierarchy of open custom-
+      // element shadow roots. Traverse it here so the comment editor and
+      // Publish/Reply buttons receive the same stable ref_ids as light DOM.
+      if (window.__wbSiteInteractions.shouldPierceShadowRoots() && el.shadowRoot) {
+        for (const child of el.shadowRoot.children || []) {
+          walk(child, nextDepth, opts, lines);
+        }
+      }
+    } else if (nodeHasWalkableChildren(el) && omittedDescendantWouldBeIncluded(el, opts)) {
+      opts.depthTruncated = true;
+    }
+  }
+
+  // The control that opened a detached popup, by its own aria-controls
+  // relation (Mastodon's "More" menu, Radix and Headless UI menus): an
+  // expanded control outside the popup whose controlled element is the popup,
+  // contains it or sits inside it. Only a single match counts. Without it a
+  // portaled menu shows no tie to the post or row it acts on.
+  const POPUP_RECORD_SELECTOR = 'article,[role="article"],li,[role="listitem"],tr,[role="row"]';
+  function popupLauncher(popup) {
+    try {
+      const root = popup?.getRootNode?.() || document;
+      let found = null, scanned = 0;
+      for (const control of root.querySelectorAll('[aria-controls][aria-expanded="true"]')) {
+        if (++scanned > 200) return null;
+        if (isComposedAncestor(popup, control) || !isVisible(control)) continue;
+        const controlled = String(control.getAttribute('aria-controls') || '').split(/\s+/).filter(Boolean)
+          .map(id => root.getElementById?.(id) || document.getElementById(id)).filter(Boolean);
+        if (!controlled.some(target => target === popup || target.contains(popup) || popup.contains(target))) continue;
+        if (found) return null;
+        found = control;
+      }
+      return found;
+    } catch (e) { return null; }
+  }
+  function popupLauncherLine(popup) {
+    const launcher = popupLauncher(popup);
+    if (!launcher) return '';
+    const label = el => {
+      const name = String(modelAccessibleName(el) || '').replace(/\s+/g, ' ').substring(0, MAX_NAME_LEN).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      return getRole(el) + (name ? ' "' + name + '"' : '') + ' [' + getOrMintRef(el) + ']';
+    };
+    const record = launcher.closest(POPUP_RECORD_SELECTOR);
+    return '(opened by ' + label(launcher) + (record && !isComposedAncestor(record, popup)
+      ? ' in ' + getRole(record) + ' [' + getOrMintRef(record) + ']' : '') + ')';
+  }
+
+  // Fresh portals are interaction context for rooted reads as well as
+  // full-page reads. Their public inventory uses the same bounded tree and
+  // continuation; the underlying article scope does not become a page read.
+  function hoistOpenOverlays(opts, lines) {
+    // Hoist "overlay" surfaces (open listboxes, menus, dialogs,
+    // alertdialogs, expanded comboboxes, aria-modal containers) to the
+    // TOP of the tree output. Portals often render these as children of
+    // <body> positioned AFTER lots of base page content, which means a
+    // DOM-order walk under soft-truncation commonly misses them entirely.
+    // Without this, the model can't see the currency picker, timezone
+    // picker, confirmation dialog, etc. that just opened in response to
+    // its last click. Emitting them first guarantees they survive any
+    // later truncation.
+    const overlaySelectors = [
+      '.dropdown-menu',
+      '[role=listbox]',
+      '[role=menu]',
+      '[role=dialog]',
+      '[role=alertdialog]',
+      '[aria-modal="true"]',
+      '[role=combobox][aria-expanded="true"]',
+      'dialog[open]',
+      '[data-overlay]',
+      '.modal.show',
+      '.modal-overlay',
+      '.modal.open',
+      '[class*="DialogContent"]',
+      '[class*="ModalContent"]',
+      '[data-state="open"][role="dialog"]',
+    ];
+    const overlayEls = [];
+    const seen = new WeakSet();
+    // On pierce-enabled sites (LinkedIn's interop shell, Bilibili), the
+    // dialog we must hoist can live inside an open shadow root where
+    // document.querySelectorAll can't see it. Collect those roots so the
+    // overlay scan covers them too — without piercing, a freshly-opened
+    // composer dialog is completely absent from the tree output and the
+    // model falls back to blind coordinate clicks.
+    const overlayRoots = [document];
+    if (window.__wbSiteInteractions.shouldPierceShadowRoots()) {
+      const collectShadowRoots = (root, depth) => {
+        if (depth > 4) return;
+        let hosts;
+        try { hosts = root.querySelectorAll('*'); } catch (e) { return; }
+        for (const host of hosts) {
+          if (host.shadowRoot) {
+            overlayRoots.push(host.shadowRoot);
+            collectShadowRoots(host.shadowRoot, depth + 1);
+          }
+        }
+      };
+      collectShadowRoots(document, 0);
+    }
+    try {
+      for (const sel of overlaySelectors) {
+        for (const root of overlayRoots) {
+          const nodes = root.querySelectorAll(sel);
+          for (const n of nodes) {
+            if (seen.has(n)) continue;
+            if (!n.isConnected) continue;
+            if (n.matches('.dropdown-menu') && !isRenderedDropdownMenu(n)) continue;
+            // Quick visibility gate — don't emit hidden overlay shells.
+            try {
+              const r = n.getBoundingClientRect();
+              if (r.width < 1 || r.height < 1) continue;
+              const s = window.getComputedStyle(n);
+              if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) === 0) continue;
+            } catch (e) { continue; }
+            // Selector order may find a dialog before its modal wrapper.
+            // Keep only the outermost visible overlay in either order.
+            if (overlayEls.some(existing => isComposedAncestor(existing, n))) continue;
+            let insertionIndex = overlayEls.length;
+            for (let i = overlayEls.length - 1; i >= 0; i--) {
+              if (!isComposedAncestor(n, overlayEls[i])) continue;
+              seen.delete(overlayEls[i]);
+              overlayEls.splice(i, 1);
+              insertionIndex = i;
+            }
+            seen.add(n);
+            overlayEls.splice(insertionIndex, 0, n);
+          }
+        }
+      }
+    } catch (e) {}
+    if (overlayEls.length) {
+      lines.push(opts._emittedRefs ? '[open overlays — current context after requested subtree]' : '[open overlays — rendered first so they survive truncation]');
+      for (const n of overlayEls) {
+        const opener = popupLauncherLine(n);
+        if (opener) lines.push(opener);
+        if (n.matches('.dropdown-menu')) {
+          // Mastodon's native portal has no ARIA menu role and may extend
+          // below the viewport. Publish its exact root and rendered action
+          // inventory, with explicit offscreen metadata; ordinary AX
+          // slicing still bounds large menus. Reading never activates it.
+          const menuOpts = { ...opts, refId: getOrMintRef(n), _markOffscreen: true };
+          walk(n, 0, menuOpts, lines, true);
+          opts.depthTruncated ||= menuOpts.depthTruncated;
+        } else walk(n, 0, opts, lines, true);
+      }
+      lines.push('[/open overlays]');
+      opts._skipOverlaySet = seen;
+    }
+  }
+
+  // ── Public: build the tree ──────────────────────────────────────────────
+  function isTextEntrySurface(el) {
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName.toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (tag === 'textarea') return true;
+    if (tag === 'input') {
+      return !new Set(['submit', 'button', 'reset', 'file', 'checkbox', 'radio', 'image', 'hidden', 'color', 'range']).has(type);
+    }
+    if (role === 'textbox' || role === 'searchbox') return true;
+    if (isEditableRoot(el)) return true;
+    return false;
+  }
+
+  // The nearest ancestor, up to six levels up, that holds a text entry: a
+  // composer whose buttons act on what is typed in it.
+  function composerScopeOf(el) {
+    let node = el.parentElement;
+    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+      if (node === document.body || node === document.documentElement) return null;
+      try {
+        if (node.querySelector('textarea,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return node;
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // A button that likely submits what is typed beside it, judged by structure
+  // so it holds in every language: a native submit, or a button that shares
+  // its form or its composer with a visible text entry. Its caption is not
+  // read.
+  function isLikelySubmitSurface(el) {
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName.toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (tag !== 'button' && tag !== 'input' && role !== 'button') return false;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'submit' || type === 'image') return true;
+    if (tag === 'input' && type !== 'button') return false;
+    const scope = el.form || el.closest('form') || composerScopeOf(el);
+    if (!scope) return false;
+    try {
+      for (const field of scope.querySelectorAll('textarea,input,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="searchbox"]')) {
+        if (field !== el && isTextEntrySurface(field) && isVisible(field)) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function isPriorityActionSurface(el) {
+    if (!el || !el.tagName || !el.isConnected) return false;
+    try {
+      if (!isVisible(el) || !isInViewport(el)) return false;
+    } catch (e) {
+      return false;
+    }
+    return isTextEntrySurface(el) || isLikelySubmitSurface(el);
+  }
+
+  function hasCollectedAncestor(el, collected) {
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (collected.has(p)) return true;
+    }
+    return false;
+  }
+
+  function collectPriorityActionSurfaces() {
+    const collected = new WeakSet();
+    const out = [];
+    const add = (el) => {
+      if (!isPriorityActionSurface(el)) return;
+      if (collected.has(el) || hasCollectedAncestor(el, collected)) return;
+      collected.add(el);
+      out.push(el);
+    };
+
+    try {
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) add(active);
+    } catch (e) {}
+
+    const selectors = [
+      'textarea',
+      'input',
+      '[contenteditable]:not([contenteditable="false"])',
+      '[role="textbox"]',
+      '[role="searchbox"]',
+      'button',
+      '[role="button"]',
+      'input[type="submit"]',
+      'input[type="button"]',
+    ];
+    try {
+      for (const el of document.querySelectorAll(selectors.join(','))) {
+        add(el);
+        if (out.length >= 20) break;
+      }
+    } catch (e) {}
+
+    return { elements: out, set: collected };
+  }
+
+  function sliceTreePage(output, lines, chunkSize, page, continuationBase = {}) {
+    const safePage = Math.max(1, Math.floor(Number(page) || 1));
+    const chunks = [];
+    let current = [];
+    let currentLen = 0;
+    let startNode = 0;
+    let charStart = 0;
+    let cursor = 0;
+
+    for (const line of lines) {
+      const addLen = line.length + (current.length ? 1 : 0);
+      if (current.length && currentLen + addLen > chunkSize) {
+        const text = current.join('\n');
+        chunks.push({
+          text,
+          startNode,
+          endNode: startNode + current.length,
+          charStart,
+          charEnd: charStart + text.length,
+        });
+        cursor = charStart + text.length + 1;
+        startNode += current.length;
+        charStart = cursor;
+        current = [line];
+        currentLen = line.length;
+      } else {
+        current.push(line);
+        currentLen += addLen;
+      }
+    }
+    if (current.length || !chunks.length) {
+      const text = current.join('\n');
+      chunks.push({
+        text,
+        startNode,
+        endNode: startNode + current.length,
+        charStart,
+        charEnd: charStart + text.length,
+      });
+    }
+
+    const chunk = chunks[safePage - 1];
+    if (!chunk) {
+      return {
+        pageContent: `[tree page ${safePage}: no content at this page. The rendered tree is ${output.length} chars; request an earlier page.]`,
+        truncated: false,
+        hasMore: false,
+        page: safePage,
+        totalChars: output.length,
+        chunkStart: output.length,
+        chunkEnd: output.length,
+      };
+    }
+
+    let pageContent = chunk.text;
+    const hasMore = safePage < chunks.length;
+    const omittedBefore = chunk.startNode;
+    const omittedAfter = Math.max(0, lines.length - chunk.endNode);
+
+    if (safePage > 1) {
+      pageContent = `[tree page ${safePage}; ${omittedBefore} earlier nodes omitted]\n${pageContent}`;
+    }
+    const continuationArgs = hasMore
+      ? { ...continuationBase, page: safePage + 1 }
+      : null;
+    if (hasMore) {
+      pageContent += `\n[tree truncated: ${omittedAfter} more nodes omitted to stay under ${chunkSize} chars. Before scrolling or answering a whole-document question, call get_accessibility_tree(${JSON.stringify(continuationArgs)}) exactly for the next chunk.]`;
+    }
+
+    return withFormatterRefs({
+      pageContent,
+      truncated: hasMore,
+      hasMore,
+      page: safePage,
+      nextPage: hasMore ? safePage + 1 : undefined,
+      continuationArgs,
+      totalChars: output.length,
+      chunkStart: chunk.charStart,
+      chunkEnd: chunk.charEnd,
+    }, lines, chunk.startNode, chunk.endNode,
+      safePage > 1 ? `[tree page ${safePage}; ${omittedBefore} earlier nodes omitted]\n`.length : 0);
+  }
+
+  function fingerprintTreeContent(output) {
+    let hash = 0xcbf29ce484222325n;
+    for (let index = 0; index < output.length; index += 1) {
+      hash ^= BigInt(output.charCodeAt(index));
+      hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+    }
+    return `fnv1a64:${hash.toString(16).padStart(16, '0')}`;
+  }
+
+  const MAX_TREE_SNAPSHOTS = 3;
+
+  function treeSnapshotKey(scope, treeRevision) {
+    return JSON.stringify([
+      String(scope?.filter || 'all'),
+      Number(scope?.maxDepth),
+      Number(scope?.maxChars),
+      String(scope?.ref_id || ''),
+      String(treeRevision || ''),
+    ]);
+  }
+
+  function findTreeSnapshot(scope, treeRevision) {
+    if (!(window.__wbAxTreeSnapshots instanceof Map) || !treeRevision) return null;
+    const key = treeSnapshotKey(scope, treeRevision);
+    const snapshot = window.__wbAxTreeSnapshots.get(key) || null;
+    if (snapshot && !snapshotActionsAreCurrent(snapshot)) {
+      window.__wbAxTreeSnapshots.delete(key);
+      return null;
+    }
+    return snapshot;
+  }
+
+  function actionableTreeSnapshotSignatures(lines) {
+    const signatures = [];
+    const seen = new Set();
+    for (const { ref: refId } of formatterRefs(lines)) {
+      if (!refId || seen.has(refId)) continue;
+      seen.add(refId);
+      const el = window.__wbElementMap[refId]?.deref?.();
+      if (!el || !el.isConnected || !isInteractive(el)) continue;
+      signatures.push([refId, formatLine(el, 0)]);
+    }
+    return signatures;
+  }
+
+  function snapshotActionsAreCurrent(snapshot) {
+    if (!Array.isArray(snapshot?.actionSignatures)) return false;
+    for (const [refId, signature] of snapshot.actionSignatures) {
+      const el = window.__wbElementMap[refId]?.deref?.();
+      if (!el || !el.isConnected || !isInteractive(el) || formatLine(el, 0) !== signature) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function rememberTreeSnapshot(scope, treeRevision, output, lines) {
+    if (!treeRevision || !scope?.ref_id) return;
+    if (!(window.__wbAxTreeSnapshots instanceof Map)) window.__wbAxTreeSnapshots = new Map();
+    const key = treeSnapshotKey(scope, treeRevision);
+    window.__wbAxTreeSnapshots.delete(key);
+    const snapshotLines = lines.slice();
+    treeLineOrigins.set(snapshotLines, (treeLineOrigins.get(lines) || []).slice());
+    window.__wbAxTreeSnapshots.set(key, {
+      output,
+      lines: snapshotLines,
+      treeRevision,
+      actionSignatures: actionableTreeSnapshotSignatures(lines),
+    });
+    while (window.__wbAxTreeSnapshots.size > MAX_TREE_SNAPSHOTS) {
+      window.__wbAxTreeSnapshots.delete(window.__wbAxTreeSnapshots.keys().next().value);
+    }
+  }
+
+  function isGmailThreadIdentifier(value) {
+    const segment = String(value || '').split('?')[0];
+    return /^FMfc[A-Za-z0-9_-]+$/.test(segment) || /^[a-f0-9]{12,}$/i.test(segment);
+  }
+
+  function isGmailConversationHash(hash) {
+    const segments = String(hash || '').replace(/^#/, '').split('/').filter(Boolean);
+    const route = String(segments[0] || '').toLowerCase();
+    const threadId = segments.at(-1);
+    if (!isGmailThreadIdentifier(threadId)) return false;
+    if (route === 'label') {
+      // Label names may contain slashes and may themselves look like legacy
+      // hexadecimal thread IDs. Only Gmail's unambiguous modern ID prefix can
+      // terminate a variable-depth label conversation route.
+      return segments.length >= 3 && /^FMfc[A-Za-z0-9_-]+$/.test(threadId);
+    }
+    if (route === 'search' || route === 'category') return segments.length === 3;
+    return segments.length === 2;
+  }
+
+  function isGmailConversationRoute() {
+    if (window.location.hostname !== 'mail.google.com') return false;
+    return isGmailConversationHash(window.location.hash);
+  }
+
+  function detectGmailConversationRoot() {
+    if (!isGmailConversationRoute()) return null;
+    const candidates = [];
+    try {
+      for (const candidate of document.querySelectorAll('main,[role="main"]')) {
+        // Message HTML is untrusted and may contain arbitrary landmarks. A
+        // nested fake main must never become trusted whole-thread coverage.
+        if (candidate.closest('[role="listitem"],[role="article"],.adn,.ads')) continue;
+        if (!isVisible(candidate)) continue;
+        const gmailMessageCount = candidate.querySelectorAll('.adn,.ads').length;
+        // Inbox, search, label, and category result lists also expose semantic
+        // listitems. Fail closed unless Gmail message containers prove that
+        // this landmark is the active conversation.
+        if (!gmailMessageCount) continue;
+        const semanticMessageCount = candidate.querySelectorAll('[role="article"],[role="listitem"]').length;
+        const hasEditor = !!candidate.querySelector('textarea,[contenteditable]:not([contenteditable="false"]),[role="textbox"]');
+        const hasHeading = !!candidate.querySelector('h1,h2,h3,[role="heading"]');
+        const rect = candidate.getBoundingClientRect();
+        const visibleArea = Math.max(0, rect.width) * Math.max(0, rect.height);
+        const score = (gmailMessageCount * 1000000)
+          + (hasEditor ? 100000 : 0)
+          + (semanticMessageCount * 1000)
+          + (hasHeading ? 100 : 0)
+          + Math.min(99, Math.round(visibleArea / 10000));
+        candidates.push({ candidate, score });
+      }
+    } catch (e) {}
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.candidate || null;
+  }
+
+  function gmailConversationExpansionControlState(control) {
+    // Gmail's accessible label is localized, but these semantic jsname values
+    // remain stable across UI languages. Keep the English names as a fallback
+    // for older/alternate Gmail markup that does not expose jsname.
+    const jsname = String(control?.getAttribute?.('jsname') || '').trim();
+    if (jsname === 'xvWlrc') return 'expanded';
+    if (jsname === 'tRarif') return 'collapsed';
+    const name = String(getAccessibleName(control) || '').replace(/\s+/g, ' ').trim();
+    if (name === 'Collapse all') return 'expanded';
+    if (name === 'Expand all') return 'collapsed';
+    return null;
+  }
+
+  function isSingleMessageGmailThread(conversationRoot) {
+    if (!conversationRoot || typeof conversationRoot.querySelectorAll !== 'function') return false;
+    try {
+      const gmailMessages = Array.from(conversationRoot.querySelectorAll('.adn,.ads,[data-message-id]'));
+      if (gmailMessages.length) {
+        const topLevelGmailMessages = gmailMessages.filter(msg => (
+          !msg.closest?.('.a3s,.ii') && (!msg.parentElement || !msg.parentElement.closest?.('.adn,.ads,[data-message-id]'))
+        ));
+        return topLevelGmailMessages.length === 1;
+      }
+      const semanticMessages = Array.from(conversationRoot.querySelectorAll('[role="article"]'));
+      if (semanticMessages.length) {
+        const topLevelSemantic = semanticMessages.filter(msg => (
+          !msg.closest?.('.a3s,.ii') && (!msg.parentElement || !msg.parentElement.closest?.('[role="article"]'))
+        ));
+        return topLevelSemantic.length === 1;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function detectGmailConversationExpansionState(conversationRoot) {
+    if (!isGmailConversationRoute() || !conversationRoot) return null;
+    let collapsed = false;
+    let scanned = false;
+    try {
+      for (const control of conversationRoot.querySelectorAll('button,[role="button"]')) {
+        if (!isVisible(control)) continue;
+        // Message bodies are untrusted page data and may contain arbitrary
+        // buttons. Only Gmail chrome outside message/article containers can
+        // provide the structured expansion evidence used by the agent guard.
+        if (control.closest('[role="listitem"],[role="article"],.adn,.ads')) continue;
+        const state = gmailConversationExpansionControlState(control);
+        if (state === 'expanded') return state;
+        if (state === 'collapsed') collapsed = true;
+      }
+      scanned = true;
+    } catch (e) {}
+    if (collapsed) return 'collapsed';
+    // A thread with a single message exposes neither Expand all nor Collapse
+    // all. Report that as its own state so the read-completeness guard can tell
+    // "nothing to expand" apart from "not checked yet"; conflating the two left
+    // `done` permanently blocked on threads that were already fully readable.
+    // Only a scan that ran to completion on a verified single-message thread
+    // may report it; a multi-message thread missing controls must stay unconfirmed.
+    return (scanned && isSingleMessageGmailThread(conversationRoot)) ? 'not_applicable' : null;
+  }
+
+  function findGmailConversationExpandAll(conversationRoot) {
+    if (!isGmailConversationRoute() || !conversationRoot) return null;
+    try {
+      for (const control of conversationRoot.querySelectorAll('button,[role="button"]')) {
+        if (!isVisible(control)) continue;
+        // Only Gmail chrome outside untrusted message bodies may be invoked.
+        // This deliberately cannot turn an Ask-mode read into a general click.
+        if (control.closest('[role="listitem"],[role="article"],.adn,.ads')) continue;
+        if (gmailConversationExpansionControlState(control) === 'collapsed') return control;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  async function expandGmailConversationForRead(refId, timeoutMs) {
+    try {
+      ensureRefScope();
+      const conversationRoot = detectGmailConversationRoot();
+      if (!conversationRoot || getOrMintRef(conversationRoot) !== refId) {
+        return { attempted: false, expanded: false };
+      }
+      if (detectGmailConversationExpansionState(conversationRoot) === 'expanded') {
+        return { attempted: false, expanded: true };
+      }
+      const control = findGmailConversationExpandAll(conversationRoot);
+      if (!control) return { attempted: false, expanded: false };
+
+      control.click();
+      const timeout = Math.min(4000, Math.max(250, Number(timeoutMs) || 2500));
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeout) {
+        if (detectGmailConversationExpansionState(conversationRoot) === 'expanded') {
+          return { attempted: true, expanded: true };
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      return {
+        attempted: true,
+        expanded: detectGmailConversationExpansionState(conversationRoot) === 'expanded',
+      };
+    } catch (e) {
+      return { attempted: false, expanded: false };
+    }
+  }
+
+  function generateAccessibilityTree(filter, maxDepth, maxChars, refId, page, expectedTreeRevision) {
+    const previousHiddenStateCache = treeHiddenStateCache;
+    treeHiddenStateCache = new WeakMap();
+    jevCollector = filter === 'interactive' && !refId && (!page || page === 1) ? new Map() : null;
+    lastJevSnapshot = null;
+    jevSensitiveControlSeen = false;
+    try {
+      ensureRefScope();
+      const effFilter = filter || 'all';
+      const conversationRoot = detectGmailConversationRoot();
+      const conversationRootRefId = conversationRoot ? getOrMintRef(conversationRoot) : '';
+      const conversationExpansionState = conversationRoot
+        ? detectGmailConversationExpansionState(conversationRoot)
+        : null;
+      const conversationMetadata = {
+        tableCount: document.querySelectorAll('table').length,
+        ...(conversationRootRefId ? { conversationRootRefId } : {}),
+        ...(conversationExpansionState ? { conversationExpansionState } : {}),
+      };
+      // Bound every default tree, including `all`. The model-facing tool
+      // result is capped separately at 8k chars by default; leaving `all`
+      // unlimited made that later generic limiter chop serialized JSON and
+      // discard the structured hasMore/nextPage contract. A 6k line-aware
+      // default fits below that outer cap. Capable callers may explicitly use
+      // a 12k page only when paired with the 16k serialized-result window.
+      const defaultDepth = effFilter === 'all' ? 15 : 10;
+      const defaultChars = effFilter === 'visible' ? 3000
+                          : effFilter === 'interactive' ? 3500
+                          : 6000;
+      const opts = {
+        filter: effFilter,
+        _onIncluded: collectJevControl,
+        maxDepth: maxDepth != null ? maxDepth : defaultDepth,
+        refId: refId || null,
+      };
+      const effMaxChars = maxChars != null ? maxChars : defaultChars;
+      const baseTreeScope = {
+        filter: effFilter,
+        maxDepth: opts.maxDepth,
+        maxChars: effMaxChars,
+        ...(refId ? { ref_id: refId } : {}),
+      };
+      const gmailSnapshotEligible = !!refId
+        && !!conversationRootRefId
+        && refId === conversationRootRefId
+        && effFilter === 'all'
+        && Number(opts.maxDepth) >= 15;
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const requestedPage = Math.max(1, Math.floor(Number(page) || 1));
+      const requestedTreeRevision = String(expectedTreeRevision || '').trim();
+      const lines = [];
+
+      if (refId) {
+        const weak = window.__wbElementMap[refId];
+        if (!weak) {
+          return {
+            error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Call get_accessibility_tree without ref_id to get the current page state.`,
+            pageContent: '',
+            viewport,
+          };
+        }
+        const el = weak.deref();
+        if (!el || !el.isConnected) {
+          delete window.__wbElementMap[refId];
+          return {
+            error: `Element with ref_id '${refId}' is no longer connected to the page. Call get_accessibility_tree without ref_id to get the current page state.`,
+            pageContent: '',
+            viewport,
+          };
+        }
+        if (gmailSnapshotEligible && requestedPage > 1 && requestedTreeRevision) {
+          const snapshot = findTreeSnapshot(baseTreeScope, requestedTreeRevision);
+          if (snapshot) {
+            const continuationBase = {
+              ...baseTreeScope,
+              tree_revision: snapshot.treeRevision,
+            };
+            return {
+              ...sliceTreePage(
+                snapshot.output,
+                snapshot.lines,
+                effMaxChars,
+                requestedPage,
+                continuationBase,
+              ),
+              viewport,
+              treeRevision: snapshot.treeRevision,
+              ...conversationMetadata,
+            };
+          }
+        }
+        // A scoped read budgets its requested subtree first. Fresh portals
+        // remain available afterwards through the same bounded continuation.
+        // Shared refs prevent an anchored popup or item being emitted twice.
+        opts._emittedRefs = new Set();
+        const scopedOpts = { ...opts, _markOffscreen: !!el.closest('.dropdown-menu') };
+        walk(el, 0, scopedOpts, lines);
+        opts.depthTruncated ||= scopedOpts.depthTruncated;
+        hoistOpenOverlays(opts, lines);
+      } else if (document.body) {
+        hoistOpenOverlays(opts, lines);
+        if (effFilter === 'visible') {
+          const priority = collectPriorityActionSurfaces();
+          if (priority.elements.length) {
+            lines.push('[priority action surfaces - editable/focused/submit controls rendered first]');
+            for (const n of priority.elements) {
+              collectJevControl(n);
+              pushTreeLine(lines, n, 0);
+            }
+            lines.push('[/priority action surfaces]');
+            opts._skipPrioritySet = priority.set;
+          }
+        }
+        walk(document.body, 0, opts, lines);
+      }
+
+      sweepDeadRefs();
+
+      const output = lines.join('\n');
+      const treeRevision = fingerprintTreeContent(output);
+      const depthTruncated = opts.depthTruncated === true;
+      const revisionBound = !!refId;
+      const continuationBase = {
+        ...baseTreeScope,
+        ...(revisionBound ? { tree_revision: treeRevision } : {}),
+      };
+      if (gmailSnapshotEligible && (
+        requestedPage === 1
+        || !requestedTreeRevision
+        || requestedTreeRevision === treeRevision
+      )) {
+        rememberTreeSnapshot(baseTreeScope, treeRevision, output, lines);
+      }
+      if (revisionBound && requestedPage > 1
+          && requestedTreeRevision && requestedTreeRevision !== treeRevision) {
+        const restartArgs = {
+          ...baseTreeScope,
+          page: 1,
+        };
+        return {
+          error: 'The anchored accessibility snapshot changed or expired. Restart from page 1 with the exact returned continuationArgs.',
+          pageContent: '',
+          viewport,
+          treeRevision,
+          treeRevisionMismatch: true,
+          truncated: true,
+          hasMore: true,
+          page: requestedPage,
+          nextPage: 1,
+          continuationArgs: restartArgs,
+          restartArgs,
+          ...conversationMetadata,
+        };
+      }
+      if (effMaxChars != null && page != null && Math.floor(Number(page) || 1) > 1) {
+        return { ...sliceTreePage(output, lines, effMaxChars, page, continuationBase), viewport, treeRevision, depthTruncated, ...conversationMetadata };
+      }
+      // For 'visible' / 'interactive', truncate gracefully on overflow —
+      // small models prefer a partial tree to a hard error. For 'all'
+      // with an explicit maxChars (caller opted in), we used to return a
+      // hard error + empty pageContent, which wasted a round-trip every
+      // time. Now we degrade in two steps:
+      //   1. Slice the first effMaxChars worth of nodes and return that,
+      //      with `autoDegraded:true` + `truncated:true` + `hasMore:true`
+      //      so the caller knows to either accept the slice or call again
+      //      with a smaller maxDepth / a refId anchor.
+      //   2. Only return a hard error when even the first page would be
+      //      empty (chunkSize too small).
+      if (effMaxChars != null && output.length > effMaxChars) {
+        if (filter && filter !== 'all' && maxChars == null) {
+          return { ...sliceTreePage(output, lines, effMaxChars, page, continuationBase), viewport, treeRevision, depthTruncated, ...conversationMetadata };
+        }
+        const sliced = sliceTreePage(output, lines, effMaxChars, page, continuationBase);
+        if (sliced.pageContent && !sliced.pageContent.startsWith('[tree page')) {
+          let hint = `Tree was ${output.length} chars; auto-sliced to fit ${effMaxChars}. `;
+          if (sliced.hasMore) {
+            hint += `Call again with the exact continuationArgs ${JSON.stringify(sliced.continuationArgs)} for the next slice, OR pass a smaller maxDepth (e.g. ${Math.max(3, (opts.maxDepth || 15) - 5)}) or a refId to anchor on a specific subtree.`;
+          }
+          return {
+            ...sliced,
+            viewport,
+            treeRevision,
+            depthTruncated,
+            autoDegraded: true,
+            notice: hint,
+            ...conversationMetadata,
+          };
+        }
+        let hint = `Output exceeds ${effMaxChars} character limit (${output.length} characters). `;
+        if (refId) {
+          hint += 'The specified element has too much content. Try a smaller maxDepth or a more specific child element.';
+        } else if (maxDepth !== undefined) {
+          hint += 'Try a smaller maxDepth or use refId to focus on a specific element.';
+        } else {
+          hint += 'Try a maxDepth (e.g., maxDepth: 5) or use refId to focus on a specific element.';
+        }
+        return { error: hint, pageContent: '', viewport };
+      }
+
+      return withFormatterRefs({ pageContent: output, viewport, treeRevision, depthTruncated, ...conversationMetadata }, lines);
+    } catch (e) {
+      return {
+        error: 'Error generating accessibility tree: ' + (e && e.message || 'Unknown error'),
+        pageContent: '',
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    } finally {
+      treeHiddenStateCache = previousHiddenStateCache;
+      if (jevCollector) {
+        const controls = [...jevCollector.values()];
+        const structure = fingerprintTreeContent(JSON.stringify(controls.map(({ value, checked, signature, ...control }) => control)));
+        lastJevSnapshot = { controls, structure, progress: fingerprintTreeContent(JSON.stringify(controls)) + ':' + Math.round(scrollY), hasSensitiveControls: jevSensitiveControlSeen };
+      }
+      jevCollector = null;
+    }
+  }
+
+  // ── Public: lookup by ref_id (used by click_ax / type_ax) ──────────────
+  function lookup(refId) {
+    if (refOrdinal(refId) == null) return null;
+    const weak = window.__wbElementMap[refId];
+    if (!weak) return null;
+    const el = weak.deref();
+    if (!el || !el.isConnected) {
+      delete window.__wbElementMap[refId];
+      return null;
+    }
+    return el;
+  }
+
+  // ── Public: suggest nearby refs when the model asks for a bogus one ─────
+  //
+  // When a tool call fails with "ref_id not found", we want to give the model
+  // back an actionable hint: what refs DO exist near the one it asked for?
+  //
+  // Strategy:
+  //  • Parse the numeric suffix of the requested ref (e.g. "ref_11" → 11).
+  //  • Sort all currently-live refs by |refNum - target| ascending.
+  //  • Return up to `limit` refs with their role + accessible name.
+  //  • If the model asked for a plausibly-typed ref (text field), promote
+  //    interactive text-entry refs to the top of the suggestions.
+  function suggestNearRefs(requestedRefId, limit) {
+    const cap = typeof limit === 'number' ? limit : 6;
+    const targetNum = refOrdinal(requestedRefId);
+    const live = [];
+    for (const key in window.__wbElementMap) {
+      const weak = window.__wbElementMap[key];
+      const el = weak && weak.deref();
+      if (!el) continue;
+      try {
+        if (!el.isConnected) continue;
+        if (!isVisible(el)) continue;
+      } catch { continue; }
+      const n = refOrdinal(key) || 0;
+      const role = getRole(el);
+      const name = modelAccessibleName(el) || '';
+      const interactive = isInteractive(el);
+      live.push({ ref: key, n, role, name, interactive });
+    }
+    // Ranking strategy depends on what the model asked for:
+    //
+    //  • If the request is a well-formed ref_N: sort by numeric distance to
+    //    N (interactive ties first). This points the model at nearby refs
+    //    that actually exist — useful when it hallucinated ref_11 right
+    //    beside ref_10/ref_12.
+    //
+    //  • If the request is bogus (DOM id, placeholder word, garbage): sort
+    //    by ref-number DESCENDING, preferring refs that have an accessible
+    //    name. The highest-numbered live refs are the most recently minted
+    //    by the tree walker — almost always the newly-appeared listbox /
+    //    dialog / options the model actually wants to reach.
+    if (targetNum != null) {
+      live.sort((a, b) => {
+        if (a.interactive !== b.interactive) return a.interactive ? -1 : 1;
+        return Math.abs(a.n - targetNum) - Math.abs(b.n - targetNum);
+      });
+    } else {
+      live.sort((a, b) => {
+        const aNamed = a.name ? 1 : 0;
+        const bNamed = b.name ? 1 : 0;
+        if (aNamed !== bNamed) return bNamed - aNamed;          // named first
+        if (a.interactive !== b.interactive) return a.interactive ? -1 : 1;
+        return b.n - a.n;                                        // newest first
+      });
+    }
+    return live.slice(0, cap).map(x => ({
+      ref: x.ref,
+      role: x.role,
+      name: x.name.length > 40 ? x.name.slice(0, 40) + '…' : x.name,
+      interactive: x.interactive,
+    }));
+  }
+
+  function generateAccessibilitySubtree(rootElement, filter, maxDepth, maxChars, page) {
+    if (!rootElement || rootElement.nodeType !== 1 || !rootElement.isConnected) {
+      return {
+        error: 'Accessibility subtree root is no longer available.',
+        pageContent: '',
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    }
+    return generateAccessibilityTree(filter, maxDepth, maxChars, getOrMintRef(rootElement), page);
+  }
+
+  window.__wb_jev_snapshot = jevSnapshot;
+  window.__wb_jev_validate = jevValidate;
+  window.__generateAccessibilityTree = generateAccessibilityTree;
+  window.__generateAccessibilitySubtree = generateAccessibilitySubtree;
+  window.__wb_expand_gmail_conversation_for_read = expandGmailConversationForRead;
+  window.__wb_ax_lookup = lookup;
+  window.__wb_ax_ref = getOrMintRef;
+  window.__wb_ax_observed_refs = observedTreeRefs;
+  window.__wb_ax_name = getAccessibleName;
+  window.__wb_ax_model_name = modelAccessibleName;
+  window.__wb_ax_model_href = modelHref;
+  window.__wb_ax_account_chrome = el => !!accountChromeControl(el);
+  window.__wb_ax_role = getRole;
+  window.__wb_ax_popup_launcher = popupLauncher;
+  window.__wb_ax_section_purpose = nativeSectionPurpose;
+  window.__wb_ax_resolve_visual_target = resolveVisualTargetAtPoint;
+  window.__wb_ax_suggest = suggestNearRefs;
+})();

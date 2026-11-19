@@ -1,51 +1,42 @@
-# WebBrain × runvm — 把开源 AI 浏览器代理跑起来做真实自动化
+# WebBrain × runvm — 把开源 AI 浏览器代理的页面能力跑进 runvm
 
-本示例演示如何把 [WebBrain](https://github.com/webbrain-one/webbrain)（开源 AI 浏览器代理扩展）作为真实自动化目标：
+本示例演示如何在 runvm 里获得 [WebBrain](https://github.com/webbrain-one/webbrain)
+（开源 AI 浏览器代理）的页面感知与控制能力，并暴露成 MCP 工具给模型统一调用：
 
-1. **编译扩展**：产出 Chrome / Firefox 双端构建与商店 zip。
-2. **跑真实自动化**：用 runvm 的 H5 后端直接驱动目标网页（h5_open / h5_eval / h5_screenshot），再走**真实扩展路径**——Chromium 加载扩展 + webbrain MCP server 委托 AI 代理在页面上执行 Ask（只读分析）与 Act（滚动/点击）任务。
+1. **runvm 原生 `webbrain` 工具**（推荐）：`h5_open` 带 `"webbrain": true` 打开页面时，自动注入
+   WebBrain 扩展的两份内容脚本（`accessibility-tree.js` + `content.js`，原样提取，见
+   [`assets/h5/webbrain/`](../../assets/h5/webbrain/README.md)），然后一个 `webbrain` 命令承接
+   全部操作——与 WebBrain 扩展 agent 用的是同一份页面代码。
+2. **真实扩展路径**（需要 AI 编排时）：编译 webbrain 扩展，在 Chromium 里加载，经 webbrain MCP
+   server 委托 Ask/Act 任务（见下节）。
 
-## 为什么有两条路径
-
-| 路径 | 引擎 | 能加载 MV3 Chrome 扩展？ | 典型用途 |
-|---|---|---|---|
-| runvm H5 后端 | 系统 WebView（WebKitGTK / WKWebView / WebView2） | **不能**（Chrome 扩展只跑在 Chromium） | 纯页面打开、JS 注入、DOM 断言、截图、PDF |
-| Playwright + Chromium `--load-extension` | Chromium | **能** | 加载 webbrain 扩展本体，走它的 AI agent 循环 |
-
-runvm 的 H5 后端是 WebKit 视图，无法加载 Manifest V3 扩展；要跑 webbrain 扩展本体必须用 Chromium。两者互补：runvm 提供免安装的页面自动化，Chromium + 扩展提供完整的 AI 浏览器代理。
-
-## 快速开始
-
-### 0. 前置
-
-- Node 20+（编译 webbrain 与跑驱动脚本）
-- Go 1.27+ / 已发布的 runvm 二进制（H5 后端）
-- 一个 OpenAI 兼容或 Anthropic 兼容的 LLM 端点（webbrain 的 agent 循环需要模型；本示例默认火山方舟 Coding Plan 的 Anthropic 兼容端点）
-
-### 1. 编译 webbrain 扩展
+## runvm 原生 webbrain 工具（页面感知 + 控制）
 
 ```bash
-git clone https://github.com/webbrain-one/webbrain.git && cd webbrain
-npm ci && npm install-scripts approve esbuild   # npm 11 需放行 esbuild 的 postinstall
-npm run build:chrome   # → build/chrome（Chromium 加载目录）
-npm run build:firefox  # → build/firefox
-npm run build:zip      # → dist/webbrain-chrome-<ver>.zip 等商店包
-```
-
-### 2. runvm H5 路径：直接驱动小红书
-
-```bash
-runvm http -addr 127.0.0.1:41000   # 或 multica env start
+runvm http -addr 127.0.0.1:41000
 # MCP 调用：
-#   h5_open    {"target":"https://www.xiaohongshu.com","visible":false,"width":1280,"height":720}
-#   h5_eval    {"session":"h5-1","js":"document.title"}
-#   h5_screenshot {"session":"h5-1","path":"xhs.png"}
-#   h5_close   {"session":"h5-1"}
+#   h5_open   {"target":"https://www.xiaohongshu.com","webbrain":true}
+#   webbrain  {"session":"h5-1","action":"snapshot"}      # 页面信息 + 紧凑可访问性树
+#   webbrain  {"session":"h5-1","action":"tree","filter":"interactive"}
+#   webbrain  {"session":"h5-1","action":"click","ref_id":"ref_7746513088815"}
+#   webbrain  {"session":"h5-1","action":"type","ref_id":"ref_7746513088812","text":"..."}
+#   webbrain  {"session":"h5-1","action":"scroll","y":900}
+#   webbrain  {"session":"h5-1","action":"press","key":"Escape"}
+#   h5_close  {"session":"h5-1"}
 ```
 
-实测（macOS）：标题 `小红书 - 你的生活兴趣社区`、跳转 `/explore`、DOM 可读（150 个内容节点/172 链接）、截图 1.2MB。
+`tree` / `interactive` / `snapshot` 返回带稳定 `ref_id` 的可访问性树与控件清单；`click` / `type` /
+`press` / `scroll` / `check` 用 `ref_id` 寻址执行——全部是 webbrain 扩展 agent 在浏览器里使用的
+同一套算法。整页导航后工具会自动重新注入。
 
-### 3. 真实扩展路径：Chromium + webbrain MCP server
+## 两条路径的边界
+
+| 路径 | 引擎 | 能力 | 用途 |
+|---|---|---|---|
+| runvm 原生 `webbrain` 工具 | WebKit WebView | 页面感知 + DOM 操作（树/点击/输入/滚动/勾选） | 模型直接驱动的页面自动化，无需浏览器扩展 |
+| Chromium + 扩展 + MCP server | Chromium | 完整 AI agent 循环（LLM 规划、多步任务、Ask/Act 模式） | 需要模型自主编排的端到端任务 |
+
+## 真实扩展路径：Chromium + webbrain MCP server
 
 ```bash
 node mcp-server 需要先构建：cd webbrain/mcp-server && npm install && npm run build

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -48,6 +49,23 @@ func TestStartReaperDisabledWithoutTimeout(t *testing.T) {
 	}
 }
 
+func TestWebbrainToolUnknownAction(t *testing.T) {
+	_, set := New("test", Limits{})
+	id := set.H5.Add(nil) // a real session needs a browser; validation is pre-browser
+	raw := json.RawMessage(`{"session":"` + id + `","action":"nope"}`)
+	if _, err := set.webbrainTool(context.Background(), raw); err == nil {
+		t.Error("unknown action should error")
+	}
+	raw = json.RawMessage(`{"session":"` + id + `"}`)
+	if _, err := set.webbrainTool(context.Background(), raw); err == nil {
+		t.Error("missing action should error")
+	}
+	raw = json.RawMessage(`{"session":"h5-404","action":"tree"}`)
+	if _, err := set.webbrainTool(context.Background(), raw); err == nil {
+		t.Error("unknown session should error")
+	}
+}
+
 func TestToolsRegistered(t *testing.T) {
 	srv, _ := New("test", Limits{})
 	want := []string{
@@ -55,6 +73,7 @@ func TestToolsRegistered(t *testing.T) {
 		"android_open", "android_symbols", "android_hook", "android_java_stub", "android_java_stubs", "android_call", "android_close",
 		"ios_open", "ios_symbols", "ios_imports", "ios_call", "ios_close",
 		"h5_open", "h5_eval", "h5_wait_for", "h5_console", "h5_screenshot", "h5_pdf", "h5_close",
+		"webbrain",
 	}
 	have := map[string]bool{}
 	for _, tool := range srv.Tools() {
