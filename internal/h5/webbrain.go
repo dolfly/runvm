@@ -93,9 +93,11 @@ func EnsureWebbrain(ctx context.Context, s *Session) error {
 }
 
 // WebbrainAct dispatches one WebBrain content-script action through the shim
-// and returns the handler's response object. params is passed to the page as
-// the action's msg.params; values are JSON-serialized.
-func WebbrainAct(ctx context.Context, s *Session, action string, params map[string]any, timeout time.Duration) (map[string]any, error) {
+// and returns the handler's response. Most handlers answer with an object, but
+// get_interactive_elements returns a bare array, so the result is any.
+// params is passed to the page as the action's msg.params; values are
+// JSON-serialized.
+func WebbrainAct(ctx context.Context, s *Session, action string, params map[string]any, timeout time.Duration) (any, error) {
 	if err := EnsureWebbrain(ctx, s); err != nil {
 		return nil, err
 	}
@@ -119,9 +121,20 @@ func WebbrainAct(ctx context.Context, s *Session, action string, params map[stri
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return nil, fmt.Errorf("webbrain: %s: decode response envelope: %w (raw=%s)", action, err, raw)
 	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(payload), &out); err != nil {
+	out, err := decodeWebbrainPayload(payload)
+	if err != nil {
 		return nil, fmt.Errorf("webbrain: %s: decode handler payload: %w (raw=%s)", action, err, payload)
+	}
+	return out, nil
+}
+
+// decodeWebbrainPayload parses a JSON.stringify'd handler response. Most
+// handlers answer with an object, but get_interactive_elements returns a bare
+// array, so the payload must decode as any rather than map[string]any.
+func decodeWebbrainPayload(payload string) (any, error) {
+	var out any
+	if err := json.Unmarshal([]byte(payload), &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
