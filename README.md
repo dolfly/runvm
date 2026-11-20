@@ -15,6 +15,12 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\n  \"hex\": \"0x1a6d\",\n  \"i32\": 6765,\n  \"symbol\": \"fib\",\n  \"value\": 6765\n}"}]}}
 ```
 
+## 宣传片
+
+<video src="https://github.com/dolfly/runvm/raw/main/assets/video/runvm-promo.mp4" poster="https://github.com/dolfly/runvm/raw/main/assets/video/runvm-promo-poster.png" controls width="100%"></video>
+
+35 秒产品宣传片：加载 AArch64 `.so` 直接调用 `fib`、`h5_eval` 读回真实 DOM、21 个 MCP 工具一览。视频源文件见 [assets/video/runvm-promo.mp4](assets/video/runvm-promo.mp4)。
+
 ## 架构
 
 ```mermaid
