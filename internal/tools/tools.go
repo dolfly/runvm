@@ -492,7 +492,7 @@ Report: engine, export count, the call you made, the value, and anything that lo
 		Arguments: []mcp.PromptArgument{
 			{Name: "task", Description: "What to accomplish on the page, in plain language", Required: true},
 			{Name: "url", Description: "Target URL to open first (optional: use the current h5 session)"},
-			{Name: "max_steps", Description: "Act/verify loop cap before reporting (default 6)"},
+			{Name: "max_steps", Description: "Act/verify loop cap before reporting; pass a string like \"6\" (default \"6\")"},
 		},
 		Build: func(args map[string]string) (string, error) {
 			task, err := mcp.RequireArg(args, "task")
