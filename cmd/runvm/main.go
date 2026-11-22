@@ -158,12 +158,12 @@ func serveHTTP(args []string) {
 	}
 }
 
-// limitsFromEnv reads the session guardrails. Both default to off/8 so a
-// forgotten session costs nothing surprising in a short run.
+// limitsFromEnv reads the session guardrails. Idle reaping is on by default:
+// a forgotten page or emulator should cost a timer, not a leak.
 func limitsFromEnv() tools.Limits {
 	return tools.Limits{
 		MaxSessions: envInt("RUNVM_MAX_SESSIONS", 8),
-		IdleTimeout: envDuration("RUNVM_IDLE_TIMEOUT", 0),
+		IdleTimeout: envDuration("RUNVM_IDLE_TIMEOUT", 30*time.Minute),
 	}
 }
 
@@ -218,7 +218,7 @@ usage:
 environment:
   RUNVM_HTTP_ADDR   default listen address for runvm http (127.0.0.1:8765)
   RUNVM_MAX_SESSIONS cap on live sessions together (default 8, 0 = unlimited)
-  RUNVM_IDLE_TIMEOUT close sessions unused this long, e.g. 30m (default off)
+  RUNVM_IDLE_TIMEOUT close sessions unused this long, e.g. 30m (default 30m, 0 = off)
   RUNVM_TOKEN      bearer token required by runvm http
   RUNVM_ASSETS     path to golem's bionic sysroot (assets/android/sdk23)
   RUNVM_ENGINE   default CPU backend, e.g. unicorn

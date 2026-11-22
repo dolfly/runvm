@@ -117,6 +117,10 @@ func Open(path string, opts OpenOptions) (*Session, error) {
 
 func (s *Session) touch() { s.lastUsed.Store(time.Now().UnixNano()) }
 
+// Touch records use, so a long inspection (symbols are read from disk, not the
+// emulator) keeps the session alive for the idle reaper.
+func (s *Session) Touch() { s.touch() }
+
 // Path is the loaded dylib.
 func (s *Session) Path() string { return s.path }
 

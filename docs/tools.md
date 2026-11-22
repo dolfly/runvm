@@ -13,9 +13,12 @@ layout: page
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 后端可用性、限制、活跃会话。不启动任何东西 |
+| `runvm_status` | 后端可用性、限制、活跃会话；h5 会话逐条给 `target`/`last_used`/存活状态，`reclaimed` 记录被自动回收的会话。不启动任何东西 |
 | `runvm_upload` | 把本机文件上传进可写资源空间（`runvm://files/`），返回 URI / 字节数 / sha256 |
 | `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源，返回 URI / 字节数 / sha256 |
+| `runvm_close_all` | 一次关闭指定后端（`android`/`ios`/`h5`）或全部会话，批量释放 `RUNVM_MAX_SESSIONS` 配额 |
+
+`runvm_status` 的 `sessions.h5` 是逐会话明细（`session`、`target`、`last_used`、`state`——`alive`/`dead`）；`sessions.android` 保持原有的明细，`sessions.ios` 仍是 ID 列表，两个键都不变。顶层 `reclaimed` 是服务端自动关闭的会话历史（`session`、`backend`、`reason`、`at`），`reason` 取值：`idle`（空闲回收）、`dead`（页面宿主进程已退出）、`close_all`（`runvm_close_all`）。
 
 **可写资源与失败语义**：`runvm_upload` 的参数是 `path`（本机文件路径，必填）+ `target`（可选相对路径/名字，默认取源文件 base name）；`runvm_write` 的参数是 `target`（必填）+ `content`（文本）或 `base64`（二进制），两者二选一。两者都返回 `{"uri", "bytes", "sha256", "name"}`，不是一句 "ok"。
 
@@ -84,6 +87,8 @@ layout: page
 | `webbrain` | `session`、`action`、`ref_id`、`text`、… | 用 WebBrain 的页面控制脚本驱动页面（见下） |
 
 `h5_open` 的 `env` 会以 `webframe.env` 暴露给页面；`ephemeral` 默认 `true`，cookie/存储/缓存只留内存。
+
+页面宿主进程自己退出（页面 `exit()`、崩溃、被杀）时，会话会被自动从注册表移除并释放配额，不需要手动 `h5_close`；这类回收会记进 `runvm_status` 的 `reclaimed`（`reason: "dead"`）。
 
 `h5_eval` 返回的是格式化文本：字符串带引号，对象是 JSON。要结构化数据就在 JS 里 `JSON.stringify`。
 

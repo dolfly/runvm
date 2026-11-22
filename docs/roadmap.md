@@ -18,8 +18,11 @@ layout: page
 | PDF | ✅ 栅格 | ✅ 栅格 | ✅ 矢量 |
 | 可写资源存储（`runvm://files/` + `runvm_upload`/`runvm_write`） | ✅ | ✅ | ✅ |
 | CI 验证 | 完整 e2e（39 项） | doctor + selftest | doctor + selftest |
+| 会话回收（死会话出栈 + 空闲回收 + 批量释放 + 状态可见） | ✅ | ✅ | ✅ |
 
 ## 还没做
+
+**运行态持久化**。会话回收（死会话出栈、空闲回收、`runvm_close_all` 批量释放、`runvm_status` 逐会话明细）已在三平台落地；但会话身份与浏览器 profile 不落盘，进程重启后无法恢复登录态——这是下一阶段的事（会话台账落盘 + 浏览器 profile 持久化 + 重启恢复）。
 
 **矢量 PDF 的另外两个平台**。macOS 已经打通：`WKWebView.createPDFWithConfiguration:` 由 `dolfly/glaze` v0.4.0 的 `PrintPDF()` 承载，`dolfly/webframe-fork` v0.3.0 透出 `Frame.PrintPDF()`，`h5_pdf` 先打印、打印不了才回落到栅格，结果里的 `vector` 字段说明是哪一种。剩下 Windows 的 `ICoreWebView2_16.PrintToPdfAsync`（COM，走 purego）和 Linux 的 `webkit_print_operation`（GTK 打印设置指向文件）。
 

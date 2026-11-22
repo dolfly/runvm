@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dolfly/runvm/internal/ios/iosprobe"
 )
@@ -211,5 +212,15 @@ func TestHexAndPrintable(t *testing.T) {
 	}
 	if hexBytes([]byte{0xde, 0xad}) != "dead" {
 		t.Errorf("hexBytes = %q", hexBytes([]byte{0xde, 0xad}))
+	}
+}
+
+func TestTouchUpdatesLastUsed(t *testing.T) {
+	s := &Session{}
+	before := s.LastUsed()
+	time.Sleep(time.Millisecond)
+	s.Touch()
+	if !s.LastUsed().After(before) {
+		t.Error("Touch must update last_used")
 	}
 }
