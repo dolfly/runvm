@@ -17,6 +17,7 @@ layout: page
 | 截图 | ✅ | ✅ | ✅ |
 | PDF | ✅ 栅格 | ✅ 栅格 | ✅ 矢量 |
 | 可写资源存储（`runvm://files/` + `runvm_upload`/`runvm_write`） | ✅ | ✅ | ✅ |
+| HTTP 控制台（`/` 下的 SPA：状态 / 资源浏览编辑 / 上传 / 登录鉴权 / 只读 MCP 调试页） | ✅ | ✅ | ✅ |
 | CI 验证 | 完整 e2e（39 项） | doctor + selftest | doctor + selftest |
 
 ## 还没做
@@ -30,8 +31,6 @@ layout: page
 **iOS 的 libSystem 那一层**。第一阶段（Mach-O 分流 + `ios_open`/`ios_call`）已落地，见下。剩下的是 iOS 没有可分发的共享库这件事：碰 `malloc`/`objc_msgSend` 的库要靠宿主侧按符号提供实现，而 Darwin 的 `ReplaceFns` 目前还在 golem 的 `internal` 里，外部模块注册不了。
 
 **HTTP 的 SSE 重放**。没有实现事件 id + `Last-Event-ID`——本服务不主动推消息，暂时不需要。
-
-**HTTP 控制台 / SPA / 登录鉴权**。阶段 1 已经落地了可写资源存储和 MCP 端上传（`runvm://files/` + `runvm_upload`/`runvm_write`），控制台要复用的地基已经就位；`runvm http` 在 `/` 下的 SPA 控制台（实时状态、资源浏览/编辑、网页上传、登录鉴权）是下一阶段，还没有做。
 
 ## iOS 后端（第一阶段已做）
 

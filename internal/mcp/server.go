@@ -79,6 +79,14 @@ func (s *Server) Tools() []*Tool {
 	return out
 }
 
+// Call dispatches one JSON-RPC message in-process and returns its response
+// envelope (nil for notifications). The HTTP console's debug page uses this to
+// exercise the server without a network round-trip, so a read-only debug view
+// never has to hold MCP credentials of its own.
+func (s *Server) Call(ctx context.Context, msg json.RawMessage) *Response {
+	return s.handle(ctx, msg)
+}
+
 // Serve reads newline-delimited JSON-RPC from in and writes replies to out
 // until the stream closes or ctx is cancelled.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {

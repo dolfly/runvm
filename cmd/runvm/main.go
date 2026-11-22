@@ -13,6 +13,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dolfly/runvm/internal/console"
 	"github.com/dolfly/runvm/internal/doctor"
 	"github.com/dolfly/runvm/internal/h5"
 	"github.com/dolfly/runvm/internal/mcp"
@@ -135,9 +138,32 @@ func serveHTTP(args []string) {
 	set.StartReaper(ctx)
 	defer set.CloseAll()
 
+	mcpHandler := server.Handler(mcp.HTTPOptions{Token: *token})
+
+	// Console credentials come from the environment. A missing password is
+	// generated and printed to stderr; there is deliberately no baked-in
+	// default password, so an out-of-the-box run is never guessable.
+	consoleUser := envOr("RUNVM_CONSOLE_USER", "admin")
+	consolePassword := os.Getenv("RUNVM_CONSOLE_PASSWORD")
+	if consolePassword == "" {
+		consolePassword = randomHex(16)
+		fmt.Fprintf(os.Stderr, "runvm: console login user %q generated password %q\n"+
+			"       (set RUNVM_CONSOLE_USER / RUNVM_CONSOLE_PASSWORD to choose)\n",
+			consoleUser, consolePassword)
+	}
+
+	handler := console.New(console.Options{
+		MCP:      mcpHandler,
+		Server:   server,
+		Store:    res,
+		Status:   func() (map[string]any, error) { return set.Status() },
+		Username: consoleUser,
+		Password: consolePassword,
+	})
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           server.Handler(mcp.HTTPOptions{Token: *token}),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -152,6 +178,7 @@ func serveHTTP(args []string) {
 		auth = "bearer token"
 	}
 	fmt.Fprintf(os.Stderr, "runvm: MCP over HTTP on http://%s/mcp (auth: %s)\n", *addr, auth)
+	fmt.Fprintf(os.Stderr, "runvm: console on http://%s/ (login: %s)\n", *addr, consoleUser)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, "runvm:", err)
 		os.Exit(1)
@@ -204,6 +231,16 @@ func envOr(key, def string) string {
 	return def
 }
 
+// randomHex returns n random bytes as hex (2n characters). It is the console
+// password generator when RUNVM_CONSOLE_PASSWORD is unset.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // crypto/rand is not expected to fail
+	}
+	return hex.EncodeToString(b)
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `runvm — test environments as MCP tools
 
@@ -220,6 +257,8 @@ environment:
   RUNVM_MAX_SESSIONS cap on live sessions together (default 8, 0 = unlimited)
   RUNVM_IDLE_TIMEOUT close sessions unused this long, e.g. 30m (default off)
   RUNVM_TOKEN      bearer token required by runvm http
+  RUNVM_CONSOLE_USER      console login username (default admin)
+  RUNVM_CONSOLE_PASSWORD  console login password (generated and printed if unset)
   RUNVM_ASSETS     path to golem's bionic sysroot (assets/android/sdk23)
   RUNVM_ENGINE   default CPU backend, e.g. unicorn
   RUNVM_RESOURCES_DIR   writable resource root (default ./runvm-resources)

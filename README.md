@@ -238,6 +238,30 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
 
 `initialize` 会返回 `Mcp-Session-Id`,本服务不强制回传。**不给 token 就只监听回环**:一个没有鉴权的端口等于让网络里的人在你的 native 模拟器里跑代码,所以 `-addr 0.0.0.0` + 无 token 会被直接拒绝。
 
+### 控制台(SPA)
+
+`runvm http` 同时在 `/` 下提供一套内嵌的单页控制台(静态资源 `go:embed` 进二进制,不依赖外网 CDN):
+
+```bash
+# 未设置 RUNVM_CONSOLE_PASSWORD 时,启动会生成随机密码并打到 stderr,没有内置默认密码
+RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/runvm http
+# runvm: MCP over HTTP on http://127.0.0.1:8765/mcp (auth: off)
+# runvm: console on http://127.0.0.1:8765/ (login: admin)
+```
+
+控制台的**任何数据都要登录后才能看到**:未登录一律 `401`;登录成功下发 `HttpOnly` + `SameSite` 会话 cookie,登出使其失效。控制台登录与 MCP 的 Bearer token 相互独立,控制台不是绕过 MCP 鉴权的入口。
+
+控制台四个页签:
+
+| 页签 | 内容 |
+|---|---|
+| 状态 | 后端可用性、各类会话数、活跃会话列表,每 3 秒自动刷新 |
+| 资源 | 列出 runvm:// 资源,区分只读/可写;文本直接看,二进制预览/下载;可写文本在线编辑保存(保存后 `resources/read` 立即读到新内容) |
+| 上传 | 网页上传本地文件进 `runvm://files/`,与 `runvm_upload` 同一套校验与大小上限 |
+| MCP 调试 | 调 runvm 自己的 MCP server,但**只读**:`initialize`/`tools/list`/`tools/call`/`resources/list`/`resources/read`/`prompts/list`/`prompts/get` 结果原样展示,能看到每次请求/响应的 JSON-RPC 原文,并带 Inspector 的 4 条 schema 可移植性检查(`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`) |
+
+调试页**不提供** `runvm_write`/`runvm_upload`(写工具)与 `android_open`/`ios_open`/`h5_open`/`*_close`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`(状态变更工具)的调用入口——它们只列出来供参考。调试页连的是进程内 runvm 自己,不给写 runvm 状态的入口。
+
 ## 环境变量
 
 | 变量 | 作用 |
@@ -247,6 +271,8 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
 | `GOLEM_UNICORN` | 显式指定 `libunicorn` 路径(golem 读取) |
 | `RUNVM_RESOURCES_DIR` | 可写资源根目录(默认工作目录下 `runvm-resources`,不存在自动建,0700) |
 | `RUNVM_RESOURCES_MAX_SIZE` | 单个上传/写入上限,如 `64MiB`(默认 64MiB) |
+| `RUNVM_CONSOLE_USER` | 控制台登录用户名(默认 `admin`) |
+| `RUNVM_CONSOLE_PASSWORD` | 控制台登录密码;未设置时启动生成随机密码打到 stderr,**无内置默认密码** |
 
 ## 限制,以及它**不是**什么
 
@@ -282,6 +308,7 @@ internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
 internal/tools/   23 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
 internal/resources/ 可写资源存储(runvm://files/ 背后的磁盘根)
+internal/console/  HTTP 控制台(SPA + 登录鉴权 + 只读 MCP 调试页)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/ios/     golem 会话池 + Mach-O 导出/导入表(无 JNI)
 internal/h5/      webframe 宿主(子进程)与驱动
