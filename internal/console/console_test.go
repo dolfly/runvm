@@ -246,8 +246,10 @@ func TestDebugPageIsReadOnly(t *testing.T) {
 	cookie := login(t, ts.URL, "admin", "p")
 
 	// The write tools and the state-changing tools have no call entry, including
-	// runvm_close_all (added after the console first landed).
-	for _, name := range []string{"runvm_write", "runvm_upload", "h5_open", "android_open", "h5_eval", "runvm_close_all"} {
+	// runvm_close_all (added after the console first landed) and webbrain / the
+	// Android hook (added after stage 4). Each must be refused with -32602
+	// (invalid params), not merely "some error".
+	for _, name := range []string{"runvm_write", "runvm_upload", "h5_open", "android_open", "h5_eval", "runvm_close_all", "webbrain", "android_hook"} {
 		req, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 			"params": map[string]any{"name": name, "arguments": map[string]any{}},
@@ -257,8 +259,13 @@ func TestDebugPageIsReadOnly(t *testing.T) {
 			t.Fatalf("debug proxy status = %d", resp.StatusCode)
 		}
 		response := out["response"].(map[string]any)
-		if response["error"] == nil {
+		errObj, _ := response["error"].(map[string]any)
+		if errObj == nil {
 			t.Errorf("tools/call %s should be refused by the debug page", name)
+			continue
+		}
+		if code, _ := errObj["code"].(float64); int(code) != mcp.CodeInvalidParams {
+			t.Errorf("tools/call %s error code = %v, want %d (-32602)", name, code, mcp.CodeInvalidParams)
 		}
 	}
 
@@ -322,6 +329,31 @@ func TestDebugCatalogAndSchemaLint(t *testing.T) {
 	}
 	if prompts := catalog["prompts"].([]any); len(prompts) != 3 {
 		t.Fatalf("prompts = %d, want 3", len(prompts))
+	}
+
+	// The catalog carries the server's own initialize answer, so the debug
+	// page can show real connection info without re-deriving capabilities.
+	init, ok := catalog["initialize"].(map[string]any)
+	if !ok {
+		t.Fatalf("catalog has no initialize: %v", catalog)
+	}
+	if info, _ := init["serverInfo"].(map[string]any); info["name"] != "runvm" || info["version"] != "test" {
+		t.Errorf("serverInfo = %v, want runvm/test", init["serverInfo"])
+	}
+	if init["protocolVersion"] != mcp.ProtocolVersion {
+		t.Errorf("protocolVersion = %v, want %v", init["protocolVersion"], mcp.ProtocolVersion)
+	}
+	caps, _ := init["capabilities"].(map[string]any)
+	for _, want := range []string{"tools", "resources", "prompts"} {
+		if _, ok := caps[want]; !ok {
+			t.Errorf("capabilities missing %q: %v", want, caps)
+		}
+	}
+	if res, _ := caps["resources"].(map[string]any); res["listChanged"] != true {
+		t.Errorf("capabilities.resources.listChanged = %v, want true", res["listChanged"])
+	}
+	if tools_, _ := caps["tools"].(map[string]any); tools_["listChanged"] != false {
+		t.Errorf("capabilities.tools.listChanged = %v, want false", tools_["listChanged"])
 	}
 
 	_, lint := doReq(t, http.MethodGet, ts.URL+"/api/debug/lint", cookie, nil, "")

@@ -174,7 +174,7 @@ MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`�
 | `GET /api/resources/read?uri=…` | 读资源内容（文本 `text`，二进制 `blob`） |
 | `PUT /api/resources/file` | 保存可写文本资源（复用 `Store.Write`） |
 | `POST /api/upload` | 上传文件（复用 `Store.Upload`，同一套校验与上限） |
-| `GET /api/debug/catalog` | 调试页目录：24 工具（带 `callable`）+ 5 种资源形态 + 3 提示词 |
+| `GET /api/debug/catalog` | 调试页目录：24 工具（带 `callable`）+ 5 种资源形态 + 3 提示词 + 连接信息（`initialize` 返回的 serverInfo / 协议版本 / capabilities） |
 | `GET /api/debug/lint` | schema 可移植性检查（4 条 Inspector 规则） |
 | `POST /api/debug` | 只读 JSON-RPC 代理：请求/响应原文，写工具与状态变更工具无调用入口 |
 

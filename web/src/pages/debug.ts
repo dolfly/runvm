@@ -1,8 +1,8 @@
 import { el, clear } from "../dom";
-import { api, ToolInfo } from "../api";
+import { api, ToolInfo, blobURL, b64ToBytes } from "../api";
 import { t } from "../i18n";
 import { jsonTree, codeBlock, pill, errorState, emptyState } from "../ui";
-import { fmtMs } from "../format";
+import { fmtMs, fmtBytes } from "../format";
 
 const METHODS = ["initialize", "ping", "tools/list", "tools/call", "resources/list", "resources/read", "prompts/list", "prompts/get"];
 
@@ -14,16 +14,37 @@ interface HistoryEntry {
   resp: unknown;
 }
 
+interface ResourceInfo {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+interface ConnectionInfo {
+  serverInfo?: { name?: string; version?: string };
+  protocolVersion?: string;
+  capabilities?: Record<string, { listChanged?: boolean }>;
+}
+
 export function renderDebug(): HTMLElement {
   const root = el("div", { class: "debug-layout" });
 
-  // connection bar
+  // connection bar: server identity, negotiated protocol version and the
+  // actually-present capabilities are filled from the catalog's initialize
+  // answer once it loads (not hard-coded).
   const conn = el("div", { class: "debug-conn" });
+  const connServer = el("span", { class: "mono" });
+  const connProto = el("span", { class: "mute mono" });
+  const connCaps = el("span", { class: "debug-caps" });
   conn.appendChild(el("span", { class: "dot ok" }));
   conn.appendChild(el("span", {}, t("state.connected")));
+  conn.appendChild(connServer);
   conn.appendChild(el("span", { class: "mute mono" }, `${t("meta.transport")}: streamable-http`));
   conn.appendChild(el("span", { class: "mute mono" }, `${t("meta.endpoint")}: /mcp`));
-  conn.appendChild(el("span", { class: "mute mono" }, `${t("meta.protocol")}: 2025-06-18`));
+  conn.appendChild(connProto);
+  conn.appendChild(connCaps);
+  conn.appendChild(el("span", { class: "mute" }, t("debug.no_progress")));
   conn.appendChild(el("span", { class: "spacer" }));
   conn.appendChild(pill("ok", t("state.readonly")));
   root.appendChild(conn);
@@ -40,7 +61,7 @@ export function renderDebug(): HTMLElement {
   root.appendChild(body);
 
   let tools: ToolInfo[] = [];
-  let resources: string[] = [];
+  let resources: ResourceInfo[] = [];
   let prompts: { name: string; description: string }[] = [];
   let lint: { issues: any[]; errors: number; warnings: number } = { issues: [], errors: 0, warnings: 0 };
   let method = "tools/list";
@@ -52,9 +73,10 @@ export function renderDebug(): HTMLElement {
     try {
       const [catalog, lintData] = await Promise.all([api.debugCatalog(), api.debugLint()]);
       tools = (catalog.tools || []) as ToolInfo[];
-      resources = (catalog.resources || []).map((r: any) => r.uri);
+      resources = (catalog.resources || []) as ResourceInfo[];
       prompts = (catalog.prompts || []) as { name: string; description: string }[];
       lint = lintData as typeof lint;
+      applyConnInfo((catalog.initialize || {}) as ConnectionInfo);
       if (!tool && tools.some((x) => x.callable)) tool = tools.find((x) => x.callable)!.name;
       renderLeft();
       renderParams();
@@ -62,6 +84,23 @@ export function renderDebug(): HTMLElement {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       right.replaceChildren(errorState(t("error.load_failed"), msg, () => void load()));
+    }
+  }
+
+  function applyConnInfo(info: ConnectionInfo) {
+    const name = info?.serverInfo?.name || "runvm";
+    const ver = info?.serverInfo?.version;
+    connServer.textContent = ver ? `${name} v${ver}` : name;
+    connProto.textContent = `${t("meta.protocol")}: ${info?.protocolVersion || "—"}`;
+    clear(connCaps);
+    const caps = info?.capabilities;
+    if (!caps) return;
+    for (const [cap, spec] of Object.entries(caps)) {
+      const changed = spec?.listChanged === true;
+      connCaps.appendChild(el("span", {
+        class: "debug-cap" + (changed ? " changed" : ""),
+        title: `${cap} · listChanged: ${changed}`,
+      }, cap));
     }
   }
 
@@ -105,11 +144,11 @@ export function renderDebug(): HTMLElement {
     }
 
     left.appendChild(groupTitle(t("debug.resources")));
-    for (const uri of resources) {
-      const row = el("div", { class: "dbg-row" }, el("span", { class: "mono subtle" }, uri));
+    for (const r of resources) {
+      const row = el("div", { class: "dbg-row res" }, resRow(r.name || r.uri, r.description, r.uri));
       row.addEventListener("click", () => {
         method = "resources/read";
-        paramsJSON = JSON.stringify({ uri }, null, 2);
+        paramsJSON = JSON.stringify({ uri: r.uri }, null, 2);
         renderLeft();
         renderParams();
       });
@@ -117,7 +156,7 @@ export function renderDebug(): HTMLElement {
     }
     left.appendChild(groupTitle(t("debug.prompts")));
     for (const p of prompts) {
-      const row = el("div", { class: "dbg-row" }, el("span", { class: "mono" }, p.name));
+      const row = el("div", { class: "dbg-row res" }, resRow(p.name, p.description));
       row.addEventListener("click", () => {
         method = "prompts/get";
         paramsJSON = JSON.stringify({ name: p.name }, null, 2);
@@ -150,9 +189,20 @@ export function renderDebug(): HTMLElement {
     return el("div", { class: "dbg-group" }, text);
   }
 
+  // resRow stacks a resource/prompt's name, description and (for resources)
+  // URI into one clickable row, so the left column shows more than a bare id.
+  function resRow(title: string, desc?: string, uri?: string): HTMLElement {
+    const col = el("div", { class: "dbg-row-main" });
+    col.appendChild(el("span", { class: "mono" }, title));
+    if (desc) col.appendChild(el("span", { class: "mute" }, desc));
+    if (uri) col.appendChild(el("span", { class: "mono subtle" }, uri));
+    return col;
+  }
+
   // --- params (middle) ---
 
   let paramsJSON = "";
+  let formMode = true; // form vs JSON editor for tools/call
   const midTabs = el("div", { class: "tabs" });
   const formTab = el("button", { class: "active" }, t("debug.form"));
   const jsonTab = el("button", {}, t("debug.json"));
@@ -160,8 +210,7 @@ export function renderDebug(): HTMLElement {
   midTabs.appendChild(jsonTab);
 
   const formWrap = el("div", { class: "dbg-params-form" });
-  const jsonArea = el("textarea", { class: "textarea mono" });
-  jsonArea.style.display = "none";
+  const jsonArea = el("textarea", { class: "textarea mono", spellcheck: "false" });
 
   const sendBtn = el("button", { class: "btn primary" }, t("action.send"));
   const elapsed = el("span", { class: "mute mono" }, "");
@@ -169,13 +218,17 @@ export function renderDebug(): HTMLElement {
 
   function renderParams() {
     clear(formWrap);
-    const methodLabel = el("div", { class: "dbg-field" },
+    formWrap.appendChild(el("div", { class: "dbg-field" },
       el("label", { class: "dbg-label" }, t("meta.method")),
-      el("span", { class: "mono" }, method));
-    formWrap.appendChild(methodLabel);
+      el("span", { class: "mono" }, method)));
+
+    const isCall = method === "tools/call";
+    // The form/JSON tabs only make sense when there is a schema form to
+    // switch from; every other method uses the JSON editor as its params view.
+    midTabs.style.display = isCall ? "" : "none";
 
     let selectedTool = tools.find((x) => x.name === tool);
-    if (method === "tools/call") {
+    if (isCall) {
       const toolSel = el("select", { class: "select" });
       for (const tt of tools.filter((x) => x.callable)) {
         const o = el("option", { value: tt.name }, tt.name) as HTMLOptionElement;
@@ -186,18 +239,23 @@ export function renderDebug(): HTMLElement {
         tool = toolSel.value;
         renderParams();
       });
-      const toolField = el("div", { class: "dbg-field" },
+      formWrap.appendChild(el("div", { class: "dbg-field" },
         el("label", { class: "dbg-label" }, "tool"),
-        toolSel);
-      formWrap.appendChild(toolField);
+        toolSel));
       selectedTool = tools.find((x) => x.name === tool);
-    }
+      if (selectedTool) buildSchemaForm(selectedTool.inputSchema, formWrap);
+      else formWrap.appendChild(el("div", { class: "mute" }, t("state.no_params")));
 
-    if (selectedTool && method === "tools/call") {
-      buildSchemaForm(selectedTool.inputSchema, formWrap);
+      formTab.className = formMode ? "active" : "";
+      jsonTab.className = formMode ? "" : "active";
+      formWrap.style.display = formMode ? "" : "none";
+      jsonArea.style.display = formMode ? "none" : "";
     } else {
-      formWrap.appendChild(el("div", { class: "mute" }, t("debug.json")));
-      formWrap.appendChild(jsonArea);
+      // No schema form: the JSON editor is the params view, always visible
+      // and kept in sync with the selected method/resource/prompt.
+      formWrap.style.display = "none";
+      jsonArea.style.display = "";
+      jsonArea.value = paramsJSON;
     }
   }
 
@@ -294,8 +352,19 @@ export function renderDebug(): HTMLElement {
       return;
     }
     if (rightTab === "result") {
-      const result = (lastResp.response as any)?.result ?? (lastResp.response as any)?.error;
-      if (result != null) rightBody.appendChild(jsonTree(result));
+      const response = (lastResp.response as any);
+      const result = response?.result ?? response?.error;
+      if (response?.error) {
+        // A JSON-RPC error renders as a plain tree (code + message), never as
+        // an image or a downloadable resource.
+        rightBody.appendChild(jsonTree(result));
+        return;
+      }
+      if (result == null) {
+        rightBody.appendChild(emptyState("▤", t("debug.history"), ""));
+        return;
+      }
+      for (const node of renderResultNodes(result, method, lastResp)) rightBody.appendChild(node);
     } else {
       rightBody.appendChild(codeBlock(JSON.stringify(lastResp.request, null, 2), t("meta.request"), true));
       rightBody.appendChild(codeBlock(JSON.stringify(lastResp.response, null, 2), t("meta.response"), true));
@@ -317,17 +386,98 @@ export function renderDebug(): HTMLElement {
     }
   }
 
+  // --- result rendering helpers ---
+
+  function renderResultNodes(result: any, method: string, last: { request: unknown; response: unknown }): HTMLElement[] {
+    // tools/call → a callResult with a `content` array that may mix text and
+    // base64 images; resources/read → `contents[0]` as text or blob.
+    if (method === "tools/call" && Array.isArray(result?.content)) {
+      return renderCallContent(result.content);
+    }
+    if (method === "resources/read" && Array.isArray(result?.contents) && result.contents.length > 0) {
+      const params = (last.request as any)?.params;
+      const uri = typeof params?.uri === "string" ? params.uri : "";
+      return renderResourceContent(result.contents[0], uri);
+    }
+    return [jsonTree(result)];
+  }
+
+  function renderCallContent(content: any[]): HTMLElement[] {
+    const out: HTMLElement[] = [];
+    for (const item of content) {
+      if (item?.type === "image") out.push(renderImage(item.data, item.mimeType));
+      else if (item?.type === "text") out.push(el("pre", { class: "codeblock" }, String(item.text ?? "")));
+      else out.push(jsonTree(item));
+    }
+    return out.length ? out : [jsonTree({ content })];
+  }
+
+  function renderResourceContent(entry: any, uri: string): HTMLElement[] {
+    const mime = String(entry?.mimeType || "");
+    if (entry?.blob) {
+      if (mime.startsWith("image/")) return [renderImage(entry.blob, mime)];
+      return [renderBinary(entry.blob, mime, uri)];
+    }
+    if (entry?.text != null) {
+      if (mime === "application/json" || mime.endsWith("+json")) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(String(entry.text));
+        } catch {
+          return [el("pre", { class: "codeblock" }, String(entry.text))];
+        }
+        return [jsonTree(parsed)];
+      }
+      return [el("pre", { class: "codeblock" }, String(entry.text))];
+    }
+    return [jsonTree(entry)];
+  }
+
+  // renderImage turns a base64 blob into an <img> and keeps a way back to the
+  // raw wire bytes (the raw tab) — the debug page's "view original" affordance.
+  function renderImage(data: string, mime: string): HTMLElement {
+    const wrap = el("div", { class: "dbg-img" });
+    const holder = el("div", { class: "img-preview" });
+    holder.appendChild(el("img", { src: blobURL(data, mime || "image/png"), decoding: "async" }));
+    wrap.appendChild(holder);
+    const bar = el("div", { class: "dbg-img-bar" });
+    bar.appendChild(el("span", { class: "mute mono" }, mime || "image/png"));
+    bar.appendChild(el("span", { class: "spacer" }));
+    bar.appendChild(el("button", { class: "btn ghost sm", onclick: () => { rightTab = "raw"; syncRightTabs(); renderRight(); } }, t("debug.view_raw")));
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
+  // renderBinary shows non-image blobs (PDF, unknown) as metadata + a download
+  // link instead of a JSON tree full of base64.
+  function renderBinary(data: string, mime: string, uri: string): HTMLElement {
+    const box = el("div", { class: "binary-info" });
+    const bytes = b64ToBytes(data);
+    const rows: [string, string][] = [
+      [t("table.col.type"), mime || "application/octet-stream"],
+      [t("table.col.size"), fmtBytes(bytes.length)],
+    ];
+    for (const [k, v] of rows) {
+      box.appendChild(el("div", { class: "binary-row" },
+        el("span", { class: "mute" }, k), el("span", { class: "mono" }, v)));
+    }
+    box.appendChild(el("a", { href: blobURL(data, mime || "application/octet-stream"), download: basename(uri) },
+      el("button", { class: "btn ghost sm" }, t("action.download"))));
+    return box;
+  }
+
+  function basename(uri: string): string {
+    const seg = uri.split("?")[0].split("/").filter(Boolean).pop() || "";
+    return seg || "resource";
+  }
+
   formTab.addEventListener("click", () => {
-    formTab.className = "active";
-    jsonTab.className = "";
-    formWrap.style.display = "";
-    jsonArea.style.display = "none";
+    formMode = true;
+    renderParams();
   });
   jsonTab.addEventListener("click", () => {
-    jsonTab.className = "active";
-    formTab.className = "";
-    formWrap.style.display = "none";
-    jsonArea.style.display = "";
+    formMode = false;
+    renderParams();
   });
   resultTab.addEventListener("click", () => { rightTab = "result"; syncRightTabs(); renderRight(); });
   rawTab.addEventListener("click", () => { rightTab = "raw"; syncRightTabs(); renderRight(); });

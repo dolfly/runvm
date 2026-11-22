@@ -132,3 +132,55 @@ test("i18n switch is in-place, persists, and leaves no untranslated chrome", asy
   await page.locator(".segmented button", { hasText: "中文" }).click();
   await expect(page.locator(".nav a").nth(0)).toHaveText("系统总览");
 });
+
+test("debug page shows real connection info and capabilities", async ({ page }) => {
+  await login(page);
+  await page.goto("/debug");
+  await expect(page.locator(".debug-layout")).toBeVisible();
+
+  // server identity + negotiated protocol come from the catalog's initialize
+  // answer, not hard-coded strings.
+  await expect(page.locator(".debug-conn")).toContainText("runvm");
+  await expect(page.locator(".debug-conn")).toContainText("protocol: 2025-06-18");
+
+  // capabilities list: tools / resources / prompts, with resources.listChanged
+  // the one true flag (marked by the `.changed` class). JSON round-trips sort
+  // map keys alphabetically, so assert by name rather than by chip order.
+  await expect(page.locator(".debug-cap")).toHaveCount(3);
+  await expect(page.locator(".debug-cap", { hasText: "tools" })).toBeVisible();
+  await expect(page.locator(".debug-cap", { hasText: "resources" })).toBeVisible();
+  await expect(page.locator(".debug-cap", { hasText: "prompts" })).toBeVisible();
+  await expect(page.locator(".debug-cap", { hasText: "resources" })).toHaveClass(/changed/);
+
+  // English pass: the same connection info must localize cleanly, no leftover
+  // untranslated tokens.
+  await page.locator(".segmented button", { hasText: "EN" }).click();
+  await expect(page.locator(".debug-conn")).toContainText("No progress stream on this connection");
+  await expect(page.locator(".debug-conn")).toContainText("runvm");
+});
+
+test("debug page lists resource and prompt descriptions", async ({ page }) => {
+  await login(page);
+  await page.goto("/debug");
+
+  // a prompt row shows its description, not just its name
+  const promptRow = page.locator(".dbg-row.res", { hasText: "smoke-test-page" });
+  await expect(promptRow).toContainText("Drive a real WebKit page");
+
+  // a fixed resource row shows its description
+  const resRow = page.locator(".dbg-row.res", { hasText: "Tool catalog" });
+  await expect(resRow).toContainText("Every tool this server exposes");
+});
+
+test("debug page renders an image resource inline", async ({ page }) => {
+  await login(page);
+  await page.goto("/debug");
+
+  // select the pre-populated pixel.png resource → resources/read, then send
+  await page.locator(".dbg-row.res", { hasText: "pixel.png" }).click();
+  await page.locator(".dbg-sendbar .btn.primary").click();
+
+  // the image blob is rendered as an <img>, and "view raw" stays available
+  await expect(page.locator(".dbg-right-body img")).toBeVisible();
+  await expect(page.locator(".dbg-img-bar button")).toHaveText("看原文");
+});

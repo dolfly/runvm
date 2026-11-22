@@ -349,7 +349,7 @@ button { font: inherit; }
 
 /* Debug page */
 .debug-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.debug-conn { height: 48px; border-bottom: 1px solid var(--c-hairline); display: flex; align-items: center; gap: var(--s-4); padding: 0 16px; flex: none; }
+.debug-conn { height: 48px; border-bottom: 1px solid var(--c-hairline); display: flex; align-items: center; gap: var(--s-4); padding: 0 16px; flex: none; overflow-x: auto; white-space: nowrap; }
 .debug-body { flex: 1; display: grid; grid-template-columns: 240px minmax(320px, 1fr) minmax(320px, 1fr); min-height: 0; }
 .debug-left { border-right: 1px solid var(--c-hairline); padding: var(--s-2); overflow: auto; }
 .debug-mid { border-right: 1px solid var(--c-hairline); padding: var(--s-4); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
@@ -372,6 +372,16 @@ button { font: inherit; }
 .dbg-right-body { flex: 1; overflow: auto; padding: var(--s-3); }
 .lint-row { display: flex; align-items: center; gap: var(--s-2); height: 32px; border-bottom: 1px solid var(--c-hairline); }
 .lint-row .mono { font-size: var(--fs-mono-sm); }
+.debug-caps { display: inline-flex; align-items: center; gap: var(--s-1); }
+.debug-cap { font: 400 var(--fs-micro)/var(--lh-micro) var(--font-mono); color: var(--c-mute); border: 1px solid var(--c-hairline-strong); border-radius: var(--r-sm); padding: 1px 6px; }
+.debug-cap.changed { color: var(--c-ok); border-color: var(--c-ok); }
+.dbg-row.res { height: auto; min-height: 28px; align-items: flex-start; padding-top: 4px; padding-bottom: 4px; }
+.dbg-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dbg-row-main .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbg-row-main .mute, .dbg-row-main .mono.subtle { font-size: var(--fs-micro); line-height: var(--lh-micro); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbg-img { display: flex; flex-direction: column; gap: var(--s-2); }
+.dbg-img .img-preview { min-height: 200px; }
+.dbg-img-bar { display: flex; align-items: center; gap: var(--s-2); }
 
 /* Responsive: single-column collapse below 768px (§10) */
 @media (max-width: 767px) {

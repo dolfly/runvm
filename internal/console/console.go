@@ -568,6 +568,17 @@ func (h *Handler) handleDebugCatalog(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// The connection info is the server's own initialize answer, negotiated
+	// against the newest protocol revision the console speaks. serverInfo, the
+	// negotiated version and the actually-present capabilities therefore all
+	// come from internal/mcp's initialize logic rather than being re-derived
+	// here (and drifting from what a real client would see).
+	initialize, rerr := h.dispatch(r.Context(), "initialize", map[string]any{"protocolVersion": mcp.ProtocolVersion})
+	if rerr != nil {
+		http.Error(w, rerr.Message, http.StatusInternalServerError)
+		return
+	}
+
 	prompts, rerr := h.dispatch(r.Context(), "prompts/list", nil)
 	if rerr != nil {
 		http.Error(w, rerr.Message, http.StatusInternalServerError)
@@ -583,6 +594,7 @@ func (h *Handler) handleDebugCatalog(w http.ResponseWriter, r *http.Request) {
 		"resources":      resourcesList["resources"],
 		"resource_kinds": resourceKindsWithPresence(resourcesList["resources"]),
 		"prompts":        prompts["prompts"],
+		"initialize":     initialize,
 	})
 }
 

@@ -92,10 +92,12 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD='…' runvm http
 
 调试页连的是**进程内 runvm 自己**，且**只读**——用来调 runvm 自己的 MCP server 并看协议报文，不是第二个控制台：
 
-- 列出当前 24 个工具 + 5 种资源形态 + 3 个提示词；`tools/call` 走**白名单**，只有确实只读的工具（`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`）可调，写工具与所有状态变更工具（含 `runvm_close_all`）**没有调用入口**，只列出供参考；
-- 可调的工具填 JSON 参数调用，看结果（含图片类结果）；
-- 每次请求/响应都有 JSON-RPC 原文；
-- schema 可移植性检查按 Inspector 的 4 条规则（`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`）报问题；当前 runvm 基线为 0 error / 3 warning。
+- 顶部连接条显示真实连接信息：server 名称/版本、协商后的协议版本、capabilities 列表（`resources.listChanged` 为 true，`tools`/`prompts` 为 false），均来自 `initialize` 的真实返回；
+- 列出当前 24 个工具 + 5 种资源形态 + 3 个提示词；资源/提示词显示描述文字，点选即预填 `resources/read` / `prompts/get` 参数；
+- `tools/call` 走**白名单**，只有确实只读的工具（`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`）可调，写工具与所有状态变更工具（含 `runvm_close_all`）**没有调用入口**，只列出供参考；
+- 结果按内容分类：图片看图、JSON 树视图、PDF/二进制给大小与下载；每次请求/响应都有 JSON-RPC 原文；
+- schema 可移植性检查按 Inspector 的 4 条规则（`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`）报问题；当前 runvm 基线为 0 error / 3 warning；
+- 进程内直调不提供 SSE 进度流（界面明确标注「本连接不提供进度流」），不要依赖进度通知。
 
 ## 可观测性
 

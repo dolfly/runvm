@@ -133,6 +133,8 @@
   "debug.portability_ok": "无 schema 可移植性问题",
   "debug.clear_history": "清空",
   "debug.elapsed": "耗时",
+  "debug.no_progress": "本连接不提供进度流",
+  "debug.view_raw": "看原文",
   "files.tools_entry": "工具目录",
   "files.status_entry": "状态",
   "files.readonly_desc": "只读资源",

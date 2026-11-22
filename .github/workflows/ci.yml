@@ -118,6 +118,7 @@ jobs:
           printf '{"hello":"world"}' > "$RESDIR/docs/e2e.json"
           printf '# Hello\n\nThis is **markdown**.\n' > "$RESDIR/docs/readme.md"
           printf 'plain text line\n' > "$RESDIR/docs/notes.txt"
+          printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC' | base64 -d > "$RESDIR/docs/pixel.png"
           RUNVM_RESOURCES_DIR="$RESDIR" RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=secret123 \
             RUNVM_HTTP_ADDR=127.0.0.1:18767 ../bin/runvm http >/tmp/runvm-console.log 2>&1 &
           SRV=$!
