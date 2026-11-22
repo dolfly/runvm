@@ -3,7 +3,11 @@ import { api, ApiError } from "../api";
 import { t } from "../i18n";
 
 export function renderLogin(onSuccess: () => void): HTMLElement {
-  const next = new URLSearchParams(window.location.search).get("next") || "/";
+  // DESIGN §7.1: after login, return to the path the user was trying to reach.
+  // A `?next=` param (if a future server-side redirect adds one) wins; otherwise
+  // fall back to the current deep-link path, so visiting /resources/tools while
+  // logged out lands you back on /resources/tools after signing in.
+  const next = nextPath();
 
   const wrap = el("div", { class: "login-wrap" });
   const col = el("div", { class: "login-col" });
@@ -61,4 +65,13 @@ export function renderLogin(onSuccess: () => void): HTMLElement {
   col.appendChild(el("div", { class: "login-version mono" }, "runvm"));
   wrap.appendChild(col);
   return wrap;
+}
+
+// nextPath resolves where to send the user after a successful login (§7.1).
+function nextPath(): string {
+  const explicit = new URLSearchParams(window.location.search).get("next");
+  if (explicit) return explicit;
+  const current = window.location.pathname + window.location.search;
+  if (current && current !== "/") return current;
+  return "/";
 }

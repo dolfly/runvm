@@ -391,6 +391,12 @@ func TestResourceListCarriesSha256AndModTime(t *testing.T) {
 		if entry["writable"] != true {
 			t.Errorf("writable = %v", entry["writable"])
 		}
+		// `name` must be the relative path, not the MCP display label
+		// "Resource docs/report.json": the console file browser treats name as
+		// the path (DO-143 QA regression).
+		if entry["name"] != "docs/report.json" {
+			t.Errorf("name = %q, want %q", entry["name"], "docs/report.json")
+		}
 		sha, _ := entry["sha256"].(string)
 		if len(sha) != 64 {
 			t.Errorf("sha256 = %q, want 64 hex chars", sha)

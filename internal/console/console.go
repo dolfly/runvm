@@ -338,6 +338,12 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 // modification time the file-info view and status bar need. The MCP catalog
 // only carries uri/name/description/mimeType/size, so those two fields come
 // straight from the store's own listing.
+//
+// For runvm://files/* entries the `name` field is rewritten to the relative
+// path under the resources root. The MCP catalog's name is a display label
+// ("Resource <path>"), and the console's file browser treats `name` as the
+// path — a display label there would make tree/save/select all target the
+// wrong location (DO-143 QA regression).
 func (h *Handler) handleResourcesList(w http.ResponseWriter, r *http.Request) {
 	result, rerr := h.dispatch(r.Context(), "resources/list", nil)
 	if rerr != nil {
@@ -368,6 +374,7 @@ func (h *Handler) handleResourcesList(w http.ResponseWriter, r *http.Request) {
 		entry["writable"] = writable
 		if writable {
 			name := strings.TrimPrefix(uri, "runvm://files/")
+			entry["name"] = name
 			if m, ok := fileMeta[name]; ok {
 				entry["sha256"] = m.Sha256
 				entry["mod_time"] = m.ModTime.UTC().Format(time.RFC3339)

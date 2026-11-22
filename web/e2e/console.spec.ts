@@ -76,6 +76,27 @@ test("file browser previews, edits and saves json; rejects invalid json", async 
   await editor.fill('{"hello":"world","edited":true}');
   await page.locator(".files-view-pane .editor-bar button", { hasText: "保存" }).click();
   await expect(page.locator(".toast.ok")).toBeVisible({ timeout: 10000 });
+
+  // QA regression: the save must land at runvm://files/docs/e2e.json (the real
+  // path), not a new "Resource docs/e2e.json" file. Read the resource back.
+  const readback = await page.evaluate(async () => {
+    const r = await fetch("/api/resources/read?uri=" + encodeURIComponent("runvm://files/docs/e2e.json"));
+    return await r.json();
+  });
+  expect(readback.text).toBe('{"hello":"world","edited":true}');
+});
+
+test("deep link login returns to the original path", async ({ page }) => {
+  // Visit a deep link while logged out; after signing in the user must land
+  // back on that path (§7.1), not on /.
+  await page.goto("/resources/tools");
+  await expect(page.locator(".login-col")).toBeVisible();
+  await page.locator('input[autocomplete="username"]').fill(USER);
+  await page.locator('input[type="password"]').fill(PASS);
+  await page.locator(".login-btn").click();
+  await expect(page.locator(".topbar")).toBeVisible({ timeout: 15000 });
+  await expect(page).toHaveURL(/\/resources\/tools/);
+  await expect(page.locator(".tools-layout")).toBeVisible();
 });
 
 test("read-only resource has no edit affordance", async ({ page }) => {
