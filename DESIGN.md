@@ -864,7 +864,7 @@ runvm 控制台
 │                           │  │ ┌────────────────────────────────────────────────────┐│    │  组头 32px 高
 │                           │  │ │ runvm_status          JSON  runvm://status         ││    │  结果行 32px；名称等宽 12px
 │                           │  │ │ 读取后端、限制与活跃会话                            ││    │  描述 13px --c-body，单行截断
-│                           │  │ │ h5_console            JSON  runvm://screenshot/…   ││    │  命中高亮 --c-accent-soft
+│                           │  │ │ h5_console            JSON  runvm://tools          ││    │  命中高亮 --c-accent-soft
 │                           │  │ └────────────────────────────────────────────────────┘│    │
 │                           │  │ 截图 (1)                                              │    │
 │                           │  │  1f3a9c0e…png   1.2 MiB   2026-11-22T13:20:11Z       │    │
@@ -881,6 +881,7 @@ runvm 控制台
 - 命中高亮：匹配子串包 `<mark>`：`background: --c-accent-soft; color: --c-ink; padding: 0 1px; border-radius: 2px;`
 - 键盘：`↓`/`↑` 跨组连续移动（组头跳过），`Enter` 打开（工具 → 工具详情；截图 → 截图页并选中；文件 → 文件页并定位），`Esc` 清空，`/` 聚焦，`Shift+Enter` 在新标签打开原资源（对截图/文件）。
 - 结果行右侧显示资源类型 pill 与 URI（等宽 12px，`--c-mute`），URI 过长中间省略（`text-overflow: ellipsis` + `title`）。
+- 工具行 URI 语义：`runvm_status` → `runvm://status`（该工具读取的状态资源）；`h5_console` 这类输出是会话 console 缓冲、不落 `runvm://` 资源的工具，URI 写 `runvm://tools`（工具目录来源）。不要给工具编造它并不读取/写入的资源 URI。
 - 行尾显示「打开方式」提示：文件类在 hover 时右侧显示 `Enter 打开 · ⌘Enter 新标签`（11px `--c-subtle`）。
 
 ### 7.4 资源管理-工具 `/resources/tools`
@@ -933,7 +934,7 @@ runvm 控制台
 ```
 
 - 列表项两行：第一行文件名（等宽 12px，省略），第二行 `尺寸 · 字节数` + `时间戳 · 相对时间`（11px `--c-subtle`）。
-- 「打开原图」= 新标签打开 `runvm://screenshot/<session>` 的 HTTP 直出地址（`target="_blank" rel="noopener"`）；「下载」= 同地址加 `download` 属性。
+- 「打开原图」/「下载」无后端直出路由（当前 console handler 只暴露 `GET /api/resources/read?uri=…`，二进制以 base64 `blob` 返回）。实现路径：`fetch('/api/resources/read?uri=' + encodeURIComponent(uri))` → `atob(blob)` 转 `Uint8Array` → `new Blob([bytes], { type: mimeType })` → `URL.createObjectURL` → 「打开原图」用 `<a target="_blank" rel="noopener" href=objectURL>` 新标签打开、「下载」用 `<a download="<session>.png" href=objectURL>`。DO-143 可另加一条 `GET /api/resources/raw?uri=…` 直出路由省去 base64 往返，但本规格基线是 object URL 方案（不新增路由、鉴权入口保持单一）。
 - 预览要「先占位后加载」：预览框保持 `4:3` 最小高 `240px`，图片 `decoding="async"`，加载中显示骨架（§5.14），失败显示错误态（含后端原始 error）。
 - 大图缩放：双击预览在「适应窗口 / 100%」之间切换，100% 时预览区可滚动；工具栏右侧显示当前 `fit / 100%`（12px `--c-mute`）。
 - 键盘：`j/k` 切换会话，`o` 打开原图。
@@ -1005,7 +1006,7 @@ runvm 控制台
 | JSON | MIME `application/json` 或 `.json` | 树视图（§5.9） | 是 | 同一容器切 textarea（等宽 12.5/20，无行号） | 保存前 `JSON.parse` 校验；失败不提交，错误定位在「第 N 行第 M 列」（原生 `SyntaxError` 消息原样显示） |
 | Markdown `.md / .markdown` | 扩展名 | 渲染预览（prose 14/22，最大 720px，标题 20/28→16/24→14/20，代码块走 §5.8，表格走 §5.6） | 是 | 双栏（≥1280）预览 ｜ 编辑；<1280 用 `[预览][编辑]` 标签页 | 渲染用最小子集：标题、段落、行内代码、代码块、列表、引用、链接、表格、分割线；**不引入 markdown 库之外的运行时**（实现阶段可自写 ~150 行或引入 < 20 KB 的库，禁 CDN） |
 | 纯文本 `txt / log / yaml / yml / toml / csv / ini / conf / go / js / css / html / sh` | MIME `text/*` 或上列扩展名 | 纯文本（等宽 12.5/20，行号开启，`tab-size: 4`） | 是 | textarea 覆盖层 + 行号列（行号 32px 宽，`--c-mute`，`user-select: none`，与 textarea 同步滚动） | 超过 `2 MiB` 不做语法/行号，直接提示「文件较大，仅支持下载」（`--c-mute` 说明 + 下载按钮） |
-| 其他（二进制：pdf 以外的任意二进制、pdf 预览可后续） | 其余全部 | 元信息视图：`大小 / 类型 / 修改时间 / sha256` + 十六进制前 `512 B`（等宽，8 字节一行，偏移量 `00000000` 前缀） | 否 | — | 主操作「下载」；`pdf` 本版不做内嵌预览，按二进制处理（PDF 走 `runvm://pdf/*` 的直出链接在新标签打开） |
+| 其他（二进制：pdf 以外的任意二进制、pdf 预览可后续） | 其余全部 | 元信息视图：`大小 / 类型 / 修改时间 / sha256` + 十六进制前 `512 B`（等宽，8 字节一行，偏移量 `00000000` 前缀） | 否 | — | 主操作「下载」；`pdf` 本版不做内嵌预览，按二进制处理（「下载」同图片：`GET /api/resources/read` → base64 `blob` → object URL，无后端直出路由） |
 
 判定顺序写死：**MIME 优先（后端 `mimeType`），缺失时扩展名兜底，都判断不出走「其他」**。不允许在客户端重写 MIME。
 
@@ -1041,7 +1042,7 @@ runvm 控制台
 | `runvm://status` | 不进文件浏览器；从总览页以深色 JSON 视图呈现（只读） |
 | `runvm://tools` | 进「工具」页（只读）；在文件浏览器顶部固定一行只读入口（不在树里重复） |
 | `runvm://screenshot/*` | 进「截图」页（只读） |
-| `runvm://pdf/*` | 文件浏览器里不出现；只在相关会话详情给直出链接 |
+| `runvm://pdf/*` | 文件浏览器里不出现；仅在相关会话详情给「下载」（`/api/resources/read` base64 blob → object URL，无后端直出路由） |
 | `runvm://files/*` | 唯一可写族；在树中标 `● 可写` |
 
 视觉区分（三处，缺一不可）：
@@ -1091,7 +1092,8 @@ runvm 控制台
 
 ### 9.4 只读门禁的呈现（安全语义必须可见）
 
-- 左侧另有一组 **「写类工具（不可调用，7 个）」**：`runvm_upload` `runvm_write` 以及会改状态的 open/close/hook/stub/eval/action 类工具。
+- 左侧另有一组 **「不可调用工具（N 个）」**，**由 `/api/debug/catalog` 的 `callable == false` 在运行时动态生成**，不得写死数量或名称——写死会让新增工具被静默隐藏（见文末 Don't #7）。
+- 当前 main 基线（24 个工具 − 6 个白名单 = **18 个不可调用**，实现以实跑 catalog 为准，不照抄数字）：`runvm_close_all` `runvm_upload` `runvm_write` `android_open` `ios_open` `ios_call` `ios_close` `android_hook` `android_java_stub` `android_call` `android_close` `h5_open` `h5_eval` `h5_wait_for` `h5_screenshot` `h5_pdf` `h5_close` `webbrain`。
 - 这些行：文字 `--c-subtle`，行尾 `outline` pill `只读页不可调用`，`cursor: not-allowed`，不可选中（`aria-disabled="true"`，`tabindex="-1"`）。
 - 鼠标悬停：`title="调试页只读：写类与状态变更类工具不提供调用入口"`。
 - 中栏底部操作条：`发起调用` primary，但当前选中项不可调用时整体 `disabled`，并在左侧显示 `该工具不可在此页调用`（12px `--c-danger`）。
