@@ -158,3 +158,26 @@ MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`�
 | `GET /healthz` | `ok` |
 
 `initialize` 返回 `Mcp-Session-Id`，本服务不强制回传。
+
+## HTTP 控制台
+
+`runvm http` 在 `/` 下提供 SPA 控制台（`go:embed` 内嵌，不依赖外网）。控制台与 MCP 传输共用端口，但鉴权相互独立：`/mcp` 走 Bearer token，控制台走 `RUNVM_CONSOLE_USER` / `RUNVM_CONSOLE_PASSWORD`（未设密码时启动生成随机密码并打到 stderr，无内置默认密码）的会话 cookie。
+
+控制台的数据接口（未登录一律 401）：
+
+| 路径 | 作用 |
+|---|---|
+| `POST /api/login` | 登录，下发 `HttpOnly` + `SameSite` 会话 cookie |
+| `POST /api/logout` | 登出，使会话失效 |
+| `GET /api/status` | 实时运行状态（与 `runvm_status` 同源） |
+| `GET /api/resources` | 列出资源（带 `writable` 标记） |
+| `GET /api/resources/read?uri=…` | 读资源内容（文本 `text`，二进制 `blob`） |
+| `PUT /api/resources/file` | 保存可写文本资源（复用 `Store.Write`） |
+| `POST /api/upload` | 上传文件（复用 `Store.Upload`，同一套校验与上限） |
+| `GET /api/debug/catalog` | 调试页目录：24 工具（带 `callable`）+ 5 种资源形态 + 3 提示词 |
+| `GET /api/debug/lint` | schema 可移植性检查（4 条 Inspector 规则） |
+| `POST /api/debug` | 只读 JSON-RPC 代理：请求/响应原文，写工具与状态变更工具无调用入口 |
+
+调试页的「只读」由服务端强制：`tools/call` 走**白名单**（`debugCallableTools`），只有确实只读的工具（`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`）可调；写工具（`runvm_write`/`runvm_upload`）与所有状态变更工具（含 `runvm_close_all`）返回 JSON-RPC 错误，不提供调用入口。
+
+schema 可移植性检查按 Inspector 的 4 条规则实现：`boolean-schema`（裸布尔 schema）、`type-union`（`type` 为数组）、`untyped-schema`（无任何约束性 keyword）、`remote-ref`（`$ref` 指向远程 URL）。当前 runvm 基线为 **0 error / 3 warning**，3 个 warning 分别在 `ios_call.properties.args.items`、`android_call.properties.args.items`、`android_java_stub.properties.returns`（都是 `type` 数组）。

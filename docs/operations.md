@@ -27,6 +27,10 @@ layout: page
 | `RUNVM_IDLE_TIMEOUT` | `30m` | 空闲多久自动关会话，如 `30m`；`0` 表示关闭 |
 | `RUNVM_HTTP_ADDR` | `127.0.0.1:8765` | `runvm http` 默认监听地址 |
 | `RUNVM_TOKEN` | 空 | HTTP 的 Bearer token |
+| `RUNVM_CONSOLE_USER` | `admin` | 控制台登录用户名 |
+| `RUNVM_CONSOLE_PASSWORD` | 空 | 控制台登录密码；未设置时启动生成随机密码打到 stderr，无内置默认密码 |
+| `RUNVM_RESOURCES_DIR` | 工作目录下 `runvm-resources` | 可写资源根目录（0700，不存在自动建） |
+| `RUNVM_RESOURCES_MAX_SIZE` | `64MiB` | 单个上传/写入上限 |
 
 ## 会话治理
 
@@ -53,6 +57,38 @@ RUNVM_TOKEN=$(openssl rand -hex 16) runvm http -addr 0.0.0.0:8765
 - **非回环地址 + 没有 token = 拒绝启动**。一个无鉴权的端口等于让网络里的人在你的 native 模拟器里跑代码。
 - token 用常量时间比较；401 会带 `WWW-Authenticate`。
 - 容器里运行时，宿主机只暴露回环：`-p 127.0.0.1:8765:8765`。
+
+## 控制台
+
+`runvm http` 在 `/` 下提供 SPA 控制台，与 `/mcp` 共用同一个监听端口：
+
+```bash
+# 推荐显式设密码；不设则启动生成随机密码并打到 stderr
+RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD='…' runvm http
+# runvm: console on http://127.0.0.1:8765/ (login: admin)
+```
+
+- **登录**：浏览器打开 `/`，用 `RUNVM_CONSOLE_USER` / `RUNVM_CONSOLE_PASSWORD` 登录；成功下发 `HttpOnly` + `SameSite` 会话 cookie，登出使其失效。
+- **改密码**：设 `RUNVM_CONSOLE_PASSWORD` 环境变量后重启即可；进程内不存任何可写的凭据文件。
+- **数据鉴权**：控制台的任何数据接口未登录一律 `401`；控制台登录与 MCP 的 Bearer token 相互独立，控制台不是绕过 MCP 鉴权的入口。
+
+四个页签：
+
+| 页签 | 用法 |
+|---|---|
+| 状态 | 后端可用性、会话数、活跃会话列表，每 3 秒自动刷新 |
+| 资源 | 列出 runvm:// 资源并区分只读/可写；文本直接看，二进制预览/下载；可写文本在线编辑保存（保存后 `resources/read` 立即读到新内容） |
+| 上传 | 选本地文件上传进 `runvm://files/`，与 `runvm_upload` 同一套校验与大小上限 |
+| MCP 调试 | 见下 |
+
+### 调试页怎么用
+
+调试页连的是**进程内 runvm 自己**，且**只读**——用来调 runvm 自己的 MCP server 并看协议报文，不是第二个控制台：
+
+- 列出当前 24 个工具 + 5 种资源形态 + 3 个提示词；`tools/call` 走**白名单**，只有确实只读的工具（`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`）可调，写工具与所有状态变更工具（含 `runvm_close_all`）**没有调用入口**，只列出供参考；
+- 可调的工具填 JSON 参数调用，看结果（含图片类结果）；
+- 每次请求/响应都有 JSON-RPC 原文；
+- schema 可移植性检查按 Inspector 的 4 条规则（`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`）报问题；当前 runvm 基线为 0 error / 3 warning。
 
 ## 可观测性
 

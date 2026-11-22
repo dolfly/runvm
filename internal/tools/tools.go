@@ -843,6 +843,18 @@ func (s *Set) CloseAll() {
 	}
 }
 
+// Status reports the live backend and session snapshot, the same data the
+// runvm_status tool returns. The HTTP console calls this for its status pane,
+// so the console view and the MCP tool can never drift apart.
+func (s *Set) Status() (map[string]any, error) {
+	v, err := s.status(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	m, _ := v.(map[string]any)
+	return m, nil
+}
+
 // closeAll is the runvm_close_all handler: it closes every session in the
 // selected backends and reports the released IDs.
 func (s *Set) closeAll(_ context.Context, raw json.RawMessage) (any, error) {
