@@ -55,6 +55,7 @@ type Session struct {
 	exit  int
 
 	readyOnce sync.Once
+	doneOnce  sync.Once
 }
 
 // waiter is one outstanding host command: the channel its reply lands on, and
@@ -216,7 +217,7 @@ func (s *Session) readLoop(r io.Reader) {
 			s.mu.Unlock()
 		}
 	}
-	close(s.done)
+	s.doneOnce.Do(func() { close(s.done) })
 }
 
 func (s *Session) deliver(msg hostMsg) {
@@ -311,14 +312,32 @@ func (s *Session) dropPending(id int) {
 	s.mu.Unlock()
 }
 
-// Console returns buffered console lines, optionally clearing them.
+// Done returns a channel closed when the page host process exits, whether the
+// page closed itself, the parent closed it, or the child was killed. The
+// watcher that removes dead sessions from the store waits on this channel.
+func (s *Session) Done() <-chan struct{} { return s.done }
+
+// Alive reports whether the page host process is still running. A session that
+// is no longer alive is unusable (every later call fails with "page closed")
+// and must be removed from the store so it stops holding a session slot.
+func (s *Session) Alive() bool {
+	select {
+	case <-s.done:
+		return false
+	default:
+		return true
+	}
+}
+
 // touch records use, so an idle session can be reaped.
 func (s *Session) touch() { s.lastUsed.Store(time.Now().UnixNano()) }
 
 // LastUsed reports the last time this page did work.
 func (s *Session) LastUsed() time.Time { return time.Unix(0, s.lastUsed.Load()) }
 
+// Console returns buffered console lines, optionally clearing them.
 func (s *Session) Console(clear bool) []Line {
+	s.touch()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Line, len(s.lines))
@@ -333,6 +352,7 @@ func (s *Session) Console(clear bool) []Line {
 // and waits for its reply. Failures are returned unwrapped: the caller knows
 // which tool it is answering for and adds that context itself.
 func (s *Session) request(op string, timeout time.Duration) (evalReply, error) {
+	s.touch()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -507,6 +527,24 @@ func (s *Session) LastPDF() ([]byte, bool) {
 // Target is the page this session opened.
 func (s *Session) Target() string { return s.target }
 
+// NewDetached returns a Session that is not connected to any host process,
+// for callers — notably tests — that exercise session bookkeeping (touch,
+// alive/dead state, store sweeps) without booting a real browser. It has no
+// process, so Close is a no-op. alive selects whether the session models a
+// live host (open done channel) or one that has already exited (closed done
+// channel).
+func NewDetached(target string, alive bool) *Session {
+	s := &Session{
+		target:  target,
+		pending: map[int]*waiter{},
+		done:    make(chan struct{}),
+	}
+	if !alive {
+		s.doneOnce.Do(func() { close(s.done) })
+	}
+	return s
+}
+
 // Close stops the page host. Safe to call twice.
 func (s *Session) Close() error {
 	s.mu.Lock()
@@ -516,6 +554,14 @@ func (s *Session) Close() error {
 	}
 	s.closed = true
 	s.mu.Unlock()
+
+	// A detached session (NewDetached) has no host process to signal or kill.
+	if s.cmd == nil || s.cmd.Process == nil {
+		if s.stdin != nil {
+			_ = s.stdin.Close()
+		}
+		return nil
+	}
 
 	select {
 	case <-s.done:

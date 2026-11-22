@@ -124,3 +124,52 @@ func TestRequestTimesOutAndDropsPending(t *testing.T) {
 		t.Fatalf("%d pending entries left behind after a timeout", left)
 	}
 }
+
+func TestNewDetachedAliveAndDead(t *testing.T) {
+	alive := NewDetached("https://example.com", true)
+	if !alive.Alive() {
+		t.Error("a detached-alive session must report Alive")
+	}
+	if alive.Target() != "https://example.com" {
+		t.Errorf("Target = %q", alive.Target())
+	}
+
+	dead := NewDetached("https://example.com", false)
+	if dead.Alive() {
+		t.Error("a detached-dead session must not report Alive")
+	}
+	select {
+	case <-dead.Done():
+	default:
+		t.Error("a detached-dead session's Done channel must be closed")
+	}
+
+	// Closing a detached session has no host process to signal or reap.
+	if err := dead.Close(); err != nil {
+		t.Errorf("Close on detached dead: %v", err)
+	}
+	if err := alive.Close(); err != nil {
+		t.Errorf("Close on detached alive: %v", err)
+	}
+}
+
+func TestConsoleTouchesLastUsed(t *testing.T) {
+	s, _ := fakeSession(t)
+	before := s.LastUsed()
+	time.Sleep(time.Millisecond)
+	s.Console(false)
+	if !s.LastUsed().After(before) {
+		t.Error("Console must touch last_used")
+	}
+}
+
+func TestRequestTouchesLastUsed(t *testing.T) {
+	s, _ := fakeSession(t)
+	before := s.LastUsed()
+	// request touches before writing, so a call that then times out still
+	// counts as use.
+	_, _ = s.request("snapshot", 20*time.Millisecond)
+	if !s.LastUsed().After(before) {
+		t.Error("request must touch last_used")
+	}
+}
