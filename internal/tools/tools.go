@@ -7,6 +7,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/dolfly/runvm/internal/h5"
 	"github.com/dolfly/runvm/internal/ios"
 	"github.com/dolfly/runvm/internal/mcp"
+	"github.com/dolfly/runvm/internal/resources"
 	"github.com/dolfly/runvm/internal/session"
 )
 
@@ -38,6 +40,11 @@ type Set struct {
 	Android *session.Store[*android.Session]
 	IOS     *session.Store[*ios.Session]
 	H5      *session.Store[*h5.Session]
+	// Resources is the writable resource store behind runvm://files/ URIs and
+	// the runvm_upload / runvm_write tools. It may be nil, in which case the
+	// upload/write tools answer with a clear error instead of pretending to
+	// succeed.
+	Resources *resources.Store
 }
 
 // New builds the MCP server and the session set it operates on.
@@ -56,6 +63,32 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Description: "Report which backends are live and how many sessions are open. Cheap: does not boot anything.",
 		InputSchema: object(nil),
 		Handler:     s.status,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "runvm_upload",
+		Description: "Copy a local file into the writable resource store (runvm://files/<path>). " +
+			"Returns the runvm:// URI, byte count and sha256. Fails with a clear error if the " +
+			"path escapes the resources root, is a symlink, or the file exceeds the size limit " +
+			"(RUNVM_RESOURCES_MAX_SIZE, default 64 MiB) — it never silently truncates.",
+		InputSchema: object(map[string]any{
+			"path":   str("Path to the local file on this machine to upload"),
+			"target": str("Optional relative path/name under runvm://files/ (default: the source file's base name)"),
+		}, "path"),
+		Handler: s.upload,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "runvm_write",
+		Description: "Write or overwrite a resource under runvm://files/<path> from text (content) or " +
+			"base64-encoded binary (base64). Exactly one of content or base64 must be given. Returns the " +
+			"runvm:// URI, byte count and sha256. Same path/size safety as runvm_upload.",
+		InputSchema: object(map[string]any{
+			"target":  str("Relative path/name under runvm://files/ to write"),
+			"content": str("Text content to store (mutually exclusive with base64)"),
+			"base64":  str("Base64-encoded binary content to store (mutually exclusive with content)"),
+		}, "target"),
+		Handler: s.write,
 	})
 
 	srv.Add(mcp.Tool{
@@ -363,6 +396,41 @@ func (s *Set) registerCatalog(srv *mcp.Server) {
 		},
 	})
 
+	// Writable resources appear only when the store is configured and a file
+	// has been uploaded or written. Each entry reads from disk on demand, so
+	// resources/read always reflects the latest overwrite.
+	srv.AddResourceLister(func() []mcp.Resource {
+		if s.Resources == nil {
+			return nil
+		}
+		metas, err := s.Resources.List()
+		if err != nil {
+			return nil
+		}
+		out := make([]mcp.Resource, 0, len(metas))
+		for _, m := range metas {
+			name := m.Name
+			out = append(out, mcp.Resource{
+				URI:         "runvm://files/" + name,
+				Name:        "Resource " + name,
+				Description: fmt.Sprintf("%d bytes, modified %s", m.Size, m.ModTime.Format(time.RFC3339)),
+				MimeType:    m.MimeType,
+				Size:        m.Size,
+				Read: func(context.Context) (any, error) {
+					data, err := s.Resources.Read(name)
+					if err != nil {
+						return nil, err
+					}
+					if resources.IsText(data) {
+						return string(data), nil
+					}
+					return data, nil
+				},
+			})
+		}
+		return out
+	})
+
 	// Screenshots appear in the catalog only after one has been taken.
 	srv.AddResourceLister(func() []mcp.Resource {
 		out := make([]mcp.Resource, 0)
@@ -654,6 +722,78 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 			"ios":     s.IOS.IDs(),
 			"h5":      s.H5.IDs(),
 		},
+	}, nil
+}
+
+// upload implements the runvm_upload tool: copy a local file into the writable
+// resource store.
+func (s *Set) upload(_ context.Context, args json.RawMessage) (any, error) {
+	if s.Resources == nil {
+		return nil, fmt.Errorf("resource store is not configured; set RUNVM_RESOURCES_DIR and restart")
+	}
+	var p struct {
+		Path   string `json:"path"`
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, fmt.Errorf("runvm_upload: %v", err)
+	}
+	if p.Path == "" {
+		return nil, fmt.Errorf("runvm_upload: missing required argument %q", "path")
+	}
+	m, err := s.Resources.Upload(p.Path, p.Target)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"uri":    m.URI,
+		"bytes":  m.Size,
+		"sha256": m.Sha256,
+		"name":   m.Name,
+	}, nil
+}
+
+// write implements the runvm_write tool: store text or base64 binary content
+// under a writable resource URI.
+func (s *Set) write(_ context.Context, args json.RawMessage) (any, error) {
+	if s.Resources == nil {
+		return nil, fmt.Errorf("resource store is not configured; set RUNVM_RESOURCES_DIR and restart")
+	}
+	var p struct {
+		Target  string  `json:"target"`
+		Content *string `json:"content"`
+		Base64  *string `json:"base64"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, fmt.Errorf("runvm_write: %v", err)
+	}
+	if p.Target == "" {
+		return nil, fmt.Errorf("runvm_write: missing required argument %q", "target")
+	}
+	if p.Content != nil && p.Base64 != nil {
+		return nil, fmt.Errorf("runvm_write: content and base64 are mutually exclusive")
+	}
+	var data []byte
+	if p.Content != nil {
+		data = []byte(*p.Content)
+	} else if p.Base64 != nil {
+		dec, err := base64.StdEncoding.DecodeString(*p.Base64)
+		if err != nil {
+			return nil, fmt.Errorf("runvm_write: bad base64: %v", err)
+		}
+		data = dec
+	} else {
+		return nil, fmt.Errorf("runvm_write: provide exactly one of %q or %q", "content", "base64")
+	}
+	m, err := s.Resources.Write(p.Target, data)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"uri":    m.URI,
+		"bytes":  m.Size,
+		"sha256": m.Sha256,
+		"name":   m.Name,
 	}, nil
 }
 
