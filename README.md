@@ -270,6 +270,8 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/ru
 
 **中英文(i18n)**:所有界面文案走 token(`web/locales/zh-CN.json` / `en-US.json`,构建期 inline),顶栏右侧「中文 / EN」分段切换,切换不刷新整页并记住偏好(localStorage + cookie);工具名 / 参数名 / schema / URI / 时间戳 / 后端原始错误一律不翻译。字体用系统字体栈(`Sarasa Mono SC` 等 CJK 等宽字体仅作为回退,**不随二进制打包**)。
 
+调试页对齐 Inspector：顶部连接条显示真实连接信息（server 名称 / 版本 / 协商后的协议版本 / capabilities 列表，来自 `initialize` 的真实返回）；资源与提示词分组显示描述文字、点选即预填 `resources/read` / `prompts/get` 参数；`tools/call` 与 `resources/read` 结果按内容分类渲染（图片看图、JSON 树视图、PDF/二进制给大小与下载），报文与历史可回看。进程内直调无 SSE 进度流，界面明确标注。
+
 调试页的 `tools/call` 走**白名单**(`debugCallableTools`):只有确实只读的工具(`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`)可调;写工具(`runvm_write`/`runvm_upload`)与所有状态变更工具(含 `*_open`/`*_close`/`runvm_close_all`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`)在左栏显示为「不可调用」、不给调用入口。调试页连的是进程内 runvm 自己,不给写 runvm 状态的入口。结果区带 Inspector 的 4 条 schema 可移植性检查(`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`)。
 
 ## 环境变量

@@ -133,6 +133,8 @@
   "debug.portability_ok": "No schema portability issues",
   "debug.clear_history": "Clear",
   "debug.elapsed": "elapsed",
+  "debug.no_progress": "No progress stream on this connection",
+  "debug.view_raw": "View raw",
   "files.tools_entry": "Tool catalog",
   "files.status_entry": "Status",
   "files.readonly_desc": "read-only resource",
