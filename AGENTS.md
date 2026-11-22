@@ -36,7 +36,7 @@ go run ./cmd/runvm selftest   # 平台冒烟：开页面、截图、确认不是
 |---|---|
 | `cmd/runvm` | 入口：`mcp`（默认）、`http`、`web-host`、`doctor`、`selftest`、`version` |
 | `internal/mcp` | JSON-RPC / MCP 协议层，stdio 与 Streamable HTTP 两种传输，进度通知 |
-| `internal/tools` | 20 个工具、4 个资源、2 个提示词。**工具描述就是给模型的文档**，改动要当成 API 改动来对待 |
+| `internal/tools` | 23 个工具、5 个资源、3 个提示词。**工具描述就是给模型的文档**，改动要当成 API 改动来对待 |
 | `internal/h5` | 页面宿主：子进程协议（`protocol.go`）、会话（`session.go`）、宿主主体（`host.go`）、截图与 PDF 的平台实现 |
 | `internal/android` | `.so` 会话、ELF 导出表、JNI 桩、engine pool |
 | `internal/session` | 会话存储与空闲回收 |

@@ -18,7 +18,9 @@ type Resource struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	MimeType    string `json:"mimeType,omitempty"`
-	// Read returns either a string (text resource) or []byte (blob).
+	// Size, when set, is advertised in resources/list as the resource's byte
+	// size. Read returns either a string (text resource) or []byte (blob).
+	Size int64 `json:"size,omitempty"`
 	Read func(ctx context.Context) (any, error)
 }
 
@@ -27,6 +29,7 @@ type resourceEntry struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	MimeType    string `json:"mimeType,omitempty"`
+	Size        int64  `json:"size,omitempty"`
 }
 
 // PromptArgument is one named parameter of a prompt.
@@ -82,7 +85,7 @@ func (s *Server) allResources() []Resource {
 func (s *Server) listResources() any {
 	entries := make([]resourceEntry, 0)
 	for _, r := range s.allResources() {
-		entries = append(entries, resourceEntry{URI: r.URI, Name: r.Name, Description: r.Description, MimeType: r.MimeType})
+		entries = append(entries, resourceEntry{URI: r.URI, Name: r.Name, Description: r.Description, MimeType: r.MimeType, Size: r.Size})
 	}
 	return map[string]any{"resources": entries}
 }
