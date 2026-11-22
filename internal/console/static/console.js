@@ -12,11 +12,23 @@ function el(tag, attrs, ...children) {
       else if (v !== undefined && v !== null) node.setAttribute(k, v);
     }
   }
+  appendChildren(node, children);
+  return node;
+}
+
+// appendChildren appends nodes, strings, and (recursively) arrays of them, so
+// callers can pass rows.map(...) straight into el() instead of spreading first.
+function appendChildren(node, children) {
   for (const c of children) {
     if (c == null) continue;
-    node.append(c.nodeType ? c : document.createTextNode(String(c)));
+    if (Array.isArray(c)) {
+      appendChildren(node, c);
+    } else if (c.nodeType) {
+      node.append(c);
+    } else {
+      node.append(document.createTextNode(String(c)));
+    }
   }
-  return node;
 }
 
 async function api(path, opts = {}) {
@@ -277,7 +289,7 @@ $("#upload-form").addEventListener("submit", async (e) => {
   result.classList.add("hidden");
   try {
     const meta = await api("/api/upload", { method: "POST", body: fd });
-    result.textContent = "已上传：" + meta.uri + "（" + meta.bytes + " 字节, sha256 " + meta.sha256 + "）";
+    result.textContent = "已上传：" + meta.uri + "（" + meta.size + " 字节, sha256 " + meta.sha256 + "）";
     result.classList.remove("hidden");
     e.target.reset();
     await refreshResources();
