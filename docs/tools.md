@@ -13,9 +13,12 @@ layout: page
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 后端可用性、限制、活跃会话。不启动任何东西 |
+| `runvm_status` | 后端可用性、限制、活跃会话；h5 会话逐条给 `target`/`last_used`/存活状态，`reclaimed` 记录被自动回收的会话。不启动任何东西 |
 | `runvm_upload` | 把本机文件上传进可写资源空间（`runvm://files/`），返回 URI / 字节数 / sha256 |
 | `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源，返回 URI / 字节数 / sha256 |
+| `runvm_close_all` | 一次关闭指定后端（`android`/`ios`/`h5`）或全部会话，批量释放 `RUNVM_MAX_SESSIONS` 配额 |
+
+`runvm_status` 的 `sessions.h5` 是逐会话明细（`session`、`target`、`last_used`、`state`——`alive`/`dead`）；`sessions.android` 保持原有的明细，`sessions.ios` 仍是 ID 列表，两个键都不变。顶层 `reclaimed` 是服务端自动关闭的会话历史（`session`、`backend`、`reason`、`at`），`reason` 取值：`idle`（空闲回收）、`dead`（页面宿主进程已退出）、`close_all`（`runvm_close_all`）。
 
 **可写资源与失败语义**：`runvm_upload` 的参数是 `path`（本机文件路径，必填）+ `target`（可选相对路径/名字，默认取源文件 base name）；`runvm_write` 的参数是 `target`（必填）+ `content`（文本）或 `base64`（二进制），两者二选一。两者都返回 `{"uri", "bytes", "sha256", "name"}`，不是一句 "ok"。
 
@@ -84,6 +87,8 @@ layout: page
 | `webbrain` | `session`、`action`、`ref_id`、`text`、… | 用 WebBrain 的页面控制脚本驱动页面（见下） |
 
 `h5_open` 的 `env` 会以 `webframe.env` 暴露给页面；`ephemeral` 默认 `true`，cookie/存储/缓存只留内存。
+
+页面宿主进程自己退出（页面 `exit()`、崩溃、被杀）时，会话会被自动从注册表移除并释放配额，不需要手动 `h5_close`；这类回收会记进 `runvm_status` 的 `reclaimed`（`reason: "dead"`）。
 
 `h5_eval` 返回的是格式化文本：字符串带引号，对象是 JSON。要结构化数据就在 JS 里 `JSON.stringify`。
 
@@ -169,10 +174,10 @@ MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`�
 | `GET /api/resources/read?uri=…` | 读资源内容（文本 `text`，二进制 `blob`） |
 | `PUT /api/resources/file` | 保存可写文本资源（复用 `Store.Write`） |
 | `POST /api/upload` | 上传文件（复用 `Store.Upload`，同一套校验与上限） |
-| `GET /api/debug/catalog` | 调试页目录：23 工具（带 `callable`）+ 5 种资源形态 + 3 提示词 |
+| `GET /api/debug/catalog` | 调试页目录：24 工具（带 `callable`）+ 5 种资源形态 + 3 提示词 |
 | `GET /api/debug/lint` | schema 可移植性检查（4 条 Inspector 规则） |
 | `POST /api/debug` | 只读 JSON-RPC 代理：请求/响应原文，写工具与状态变更工具无调用入口 |
 
-调试页的「只读」由服务端强制：`tools/call` 对 `runvm_write` / `runvm_upload` 与状态变更工具（`android_open`/`ios_open`/`h5_open`/`*_close`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`）返回 JSON-RPC 错误，不提供调用入口。
+调试页的「只读」由服务端强制：`tools/call` 走**白名单**（`debugCallableTools`），只有确实只读的工具（`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`）可调；写工具（`runvm_write`/`runvm_upload`）与所有状态变更工具（含 `runvm_close_all`）返回 JSON-RPC 错误，不提供调用入口。
 
 schema 可移植性检查按 Inspector 的 4 条规则实现：`boolean-schema`（裸布尔 schema）、`type-union`（`type` 为数组）、`untyped-schema`（无任何约束性 keyword）、`remote-ref`（`$ref` 指向远程 URL）。当前 runvm 基线为 **0 error / 3 warning**，3 个 warning 分别在 `ios_call.properties.args.items`、`android_call.properties.args.items`、`android_java_stub.properties.returns`（都是 `type` 数组）。

@@ -362,6 +362,10 @@ func (s *Session) Hooks() map[string]uint64 {
 // touch records use, so an idle session can be reaped.
 func (s *Session) touch() { s.lastUsed.Store(time.Now().UnixNano()) }
 
+// Touch records use, so a long inspection (symbols are read from disk, not the
+// emulator) keeps the session alive for the idle reaper.
+func (s *Session) Touch() { s.touch() }
+
 // LastUsed reports the last time this session did work.
 func (s *Session) LastUsed() time.Time { return time.Unix(0, s.lastUsed.Load()) }
 

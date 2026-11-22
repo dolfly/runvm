@@ -442,28 +442,19 @@ func (h *Handler) limit() int64 {
 
 // --- debug page ------------------------------------------------------------
 
-// debugDenyTools are the tools the debug page lists but never offers a call
-// entry for: the two write tools (whose only entry is the console edit/upload
-// UI) and the state-changing tools. Keeping this list server-side means the
-// frontend cannot accidentally (or maliciously) re-enable an entry.
-var debugDenyTools = map[string]bool{
-	"runvm_write":  true,
-	"runvm_upload": true,
-
-	"android_open": true,
-	"ios_open":     true,
-	"h5_open":      true,
-
-	"android_close": true,
-	"ios_close":     true,
-	"h5_close":      true,
-
-	"android_hook":      true,
-	"android_java_stub": true,
-	"h5_eval":           true,
-	"h5_pdf":            true,
-	"h5_screenshot":     true,
-	"webbrain":          true,
+// debugCallableTools is the allow-list of tools the debug page may call: the
+// read-only, information-gathering ones. Everything else — the two write tools,
+// every open/close/hook/stub/eval/action tool, and runvm_close_all — is listed
+// in the catalog but has no call entry. An allow-list is deliberate: a deny-
+// list silently grants every future tool a call entry, so adding a tool later
+// could open a state-changing hole without touching this file.
+var debugCallableTools = map[string]bool{
+	"runvm_status":       true,
+	"ios_symbols":        true,
+	"ios_imports":        true,
+	"android_symbols":    true,
+	"android_java_stubs": true,
+	"h5_console":         true,
 }
 
 // debugMethods are the JSON-RPC methods the read-only debug page may send.
@@ -500,7 +491,7 @@ func (h *Handler) handleDebugCatalog(w http.ResponseWriter, r *http.Request) {
 			"name":        t.Name,
 			"description": t.Description,
 			"inputSchema": t.InputSchema,
-			"callable":    !debugDenyTools[t.Name],
+			"callable":    debugCallableTools[t.Name],
 		})
 	}
 
@@ -646,7 +637,7 @@ func (h *Handler) checkDebug(req *mcp.Request) *mcp.RPCError {
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		return &mcp.RPCError{Code: mcp.CodeInvalidParams, Message: "tools/call params: " + err.Error()}
 	}
-	if debugDenyTools[p.Name] {
+	if !debugCallableTools[p.Name] {
 		return &mcp.RPCError{
 			Code:    mcp.CodeInvalidParams,
 			Message: fmt.Sprintf("debug page is read-only: tool %q has no call entry here", p.Name),

@@ -2,6 +2,7 @@ package android
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -48,5 +49,15 @@ func TestSymbolFilter(t *testing.T) {
 	}
 	if got := SymbolFilter(names, ""); len(got) != len(names) {
 		t.Errorf("empty filter dropped entries: %v", got)
+	}
+}
+
+func TestTouchUpdatesLastUsed(t *testing.T) {
+	s := &Session{}
+	before := s.LastUsed()
+	time.Sleep(time.Millisecond)
+	s.Touch()
+	if !s.LastUsed().After(before) {
+		t.Error("Touch must update last_used")
 	}
 }

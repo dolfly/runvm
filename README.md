@@ -19,13 +19,13 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 <video src="https://github.com/dolfly/runvm/raw/main/assets/video/runvm-promo.mp4" poster="https://github.com/dolfly/runvm/raw/main/assets/video/runvm-promo-poster.png" controls width="100%"></video>
 
-35 秒产品宣传片：加载 AArch64 `.so` 直接调用 `fib`、`h5_eval` 读回真实 DOM、21 个 MCP 工具一览。视频源文件见 [assets/video/runvm-promo.mp4](assets/video/runvm-promo.mp4)。
+35 秒产品宣传片：加载 AArch64 `.so` 直接调用 `fib`、`h5_eval` 读回真实 DOM、24 个 MCP 工具一览。视频源文件见 [assets/video/runvm-promo.mp4](assets/video/runvm-promo.mp4)。
 
 ## 架构
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>23 个工具"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>24 个工具"]
   S --> REG["session.Store<br/>android-N / ios-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
   REG --> I["ios 后端<br/>in-process"]
@@ -136,9 +136,10 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 各后端是否可用、有几个会话(**不启动任何东西**) |
+| `runvm_status` | 各后端是否可用、有几个会话、逐会话 `target`/`last_used`/存活状态,以及 `reclaimed` 自动回收历史(**不启动任何东西**) |
 | `runvm_upload` | 把本机文件上传进可写资源空间 `runvm://files/<路径>`,返回 URI / 字节数 / sha256 |
 | `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源 |
+| `runvm_close_all` | 一次关闭指定后端或全部会话,批量释放 `RUNVM_MAX_SESSIONS` 配额 |
 | `android_open` | 加载 `.so`,跑 init,返回 `android-N` |
 | `android_symbols` | 列出导出函数(直接读 ELF,不依赖会话能否启动) |
 | `android_hook` | 把导出函数替换成"返回常量"的桩,用来摘掉依赖再测周边逻辑 |
@@ -194,14 +195,17 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 ## 会话治理
 
-长时间跑的服务最怕"模型忘了关"。两个开关:
+长时间跑的服务最怕"模型忘了关"。默认就开空闲回收,加上死会话自动出栈和批量释放:
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `RUNVM_MAX_SESSIONS` | 8 | android + ios + h5 会话总数上限,超了直接报错并提示关哪个 |
-| `RUNVM_IDLE_TIMEOUT` | 关闭 | 超过这么久没被使用的会话自动关闭,如 `30m` |
+| `RUNVM_MAX_SESSIONS` | 8 | android + ios + h5 会话总数上限,超了报错并点名该关哪个 |
+| `RUNVM_IDLE_TIMEOUT` | `30m` | 超过这么久没被使用的会话自动关闭,如 `30m`;`0` 表示关闭 |
 
-`runvm_status` 会报当前限制与每个 android 会话的 `last_used`。回收是按会话粒度的:一个被遗弃的页面或模拟器应该只花掉一个定时器,而不是一直占着内存。
+- `runvm_status` 逐会话报 h5 的 `target` / `last_used` / 存活状态(`alive`/`dead`),android 仍是明细、ios 仍是 ID 列表;`reclaimed` 记录被服务端自动关掉的会话(哪几个、为什么、什么时候)。
+- **h5 页面宿主进程死了会自己出栈**:页面 `exit()`、崩溃或被杀时,会话自动移除并释放配额,不需要手动 `h5_close`。android / ios 是进程内模拟器,没有独立宿主进程,不适用死会话出栈。
+- **所有使用会话的入口都更新 `last_used`**(`h5_console` / `h5_screenshot` / `h5_pdf` / `webbrain`,以及 android / ios 读路径),正在用的会话不会被空闲回收误杀。
+- **批量释放**用 `runvm_close_all`(可只关 `android` / `ios` / `h5`,不传则全关)。
 
 异步 UI 用 `h5_wait_for` 而不是 `sleep`:
 
@@ -260,7 +264,7 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/ru
 | 上传 | 网页上传本地文件进 `runvm://files/`,与 `runvm_upload` 同一套校验与大小上限 |
 | MCP 调试 | 调 runvm 自己的 MCP server,但**只读**:`initialize`/`tools/list`/`tools/call`/`resources/list`/`resources/read`/`prompts/list`/`prompts/get` 结果原样展示,能看到每次请求/响应的 JSON-RPC 原文,并带 Inspector 的 4 条 schema 可移植性检查(`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`) |
 
-调试页**不提供** `runvm_write`/`runvm_upload`(写工具)与 `android_open`/`ios_open`/`h5_open`/`*_close`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`(状态变更工具)的调用入口——它们只列出来供参考。调试页连的是进程内 runvm 自己,不给写 runvm 状态的入口。
+调试页的 `tools/call` 走**白名单**:只有确实只读的工具(`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`)可调;写工具(`runvm_write`/`runvm_upload`)与所有状态变更工具(含 `*_open`/`*_close`/`runvm_close_all`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`)只列出来供参考,没有调用入口。调试页连的是进程内 runvm 自己,不给写 runvm 状态的入口。
 
 ## 环境变量
 
@@ -278,6 +282,7 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/ru
 
 - **不是安全沙箱**。加载的 `.so` 在你的进程里被模拟执行,页面在真实 WebKit 里运行。只跑你信任的代码。
 - **一个页面一个进程**,`h5_open` 的成本约 0.5–1.5 秒;批量测试请复用会话。不同页面之间并行,同一个页面内的 `h5_eval` 串行(保证语句顺序)。
+- **回收是尽力而为的**:空闲回收按 `last_used` 计时,页面宿主进程退出会即时出栈;但会话身份与登录态不落盘,进程重启后无法恢复——那是下一阶段的事(见 [现状与缺口](docs/roadmap.md))。
 - **截图:三个平台都可用**(Linux Xvfb+xwd / Windows PrintWindow / macOS WKWebView snapshot)。
   - Linux:页面用 `visible: true` 画进本进程自己起的 Xvfb(屏幕=视口),`xwd` 抓根窗口,Go 里解 XWD 转 PNG——拿到的一定是那个页面,不会误抓桌面。
   - Windows:`PrintWindow` + `PW_RENDERFULLCONTENT` 抓**页面宿主子进程**的窗口。这里踩过一个坑:窗口在子进程里,而抓取在父进程里运行,按自己的 pid 枚举永远找不到——现在把宿主的 pid 传下去。CI 实测 `640x400, 19 distinct colours`。
@@ -305,7 +310,7 @@ make doctor      # 自检要单独构建：golem 靠二进制里的模块路径�
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   23 个工具的参数校验与调用编排
+internal/tools/   24 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
 internal/resources/ 可写资源存储(runvm://files/ 背后的磁盘根)
 internal/console/  HTTP 控制台(SPA + 登录鉴权 + 只读 MCP 调试页)

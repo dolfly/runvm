@@ -245,8 +245,9 @@ func TestDebugPageIsReadOnly(t *testing.T) {
 	ts, _, _ := newConsole(t, "admin", "p", resources.DefaultMaxSize)
 	cookie := login(t, ts.URL, "admin", "p")
 
-	// The write tools and the state-changing tools have no call entry.
-	for _, name := range []string{"runvm_write", "runvm_upload", "h5_open", "android_open", "h5_eval"} {
+	// The write tools and the state-changing tools have no call entry, including
+	// runvm_close_all (added after the console first landed).
+	for _, name := range []string{"runvm_write", "runvm_upload", "h5_open", "android_open", "h5_eval", "runvm_close_all"} {
 		req, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 			"params": map[string]any{"name": name, "arguments": map[string]any{}},
@@ -293,16 +294,28 @@ func TestDebugCatalogAndSchemaLint(t *testing.T) {
 
 	_, catalog := doReq(t, http.MethodGet, ts.URL+"/api/debug/catalog", cookie, nil, "")
 	toolsList := catalog["tools"].([]any)
-	if len(toolsList) != 23 {
-		t.Fatalf("tools = %d, want 23", len(toolsList))
+	if len(toolsList) != 24 {
+		t.Fatalf("tools = %d, want 24", len(toolsList))
 	}
+	seenCloseAll := false
 	for _, item := range toolsList {
 		entry := item.(map[string]any)
 		name := entry["name"].(string)
 		callable := entry["callable"].(bool)
-		if debugDenyTools[name] && callable {
-			t.Errorf("tool %s must not be callable from the debug page", name)
+		if name == "runvm_close_all" {
+			seenCloseAll = true
 		}
+		// The catalog's callable flag must match the allow-list exactly: an
+		// allow-listed tool is callable, everything else is read-only.
+		if callable != debugCallableTools[name] {
+			t.Errorf("tool %s callable = %v, want %v", name, callable, debugCallableTools[name])
+		}
+	}
+	if !seenCloseAll {
+		t.Error("runvm_close_all missing from the debug catalog")
+	}
+	if debugCallableTools["runvm_close_all"] {
+		t.Error("runvm_close_all must not be in the debug allow-list")
 	}
 	if kinds := catalog["resource_kinds"].([]any); len(kinds) != 5 {
 		t.Fatalf("resource_kinds = %d, want 5", len(kinds))
