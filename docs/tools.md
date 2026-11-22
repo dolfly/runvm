@@ -13,7 +13,10 @@ layout: page
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 后端可用性、限制、活跃会话。不启动任何东西 |
+| `runvm_status` | 后端可用性、限制、活跃会话；h5 会话逐条给 `target`/`last_used`/存活状态，`reclaimed` 记录被自动回收的会话。不启动任何东西 |
+| `runvm_close_all` | 一次关闭指定后端（`android`/`ios`/`h5`）或全部会话，批量释放 `RUNVM_MAX_SESSIONS` 配额 |
+
+`runvm_status` 的 `sessions.h5` 是逐会话明细（`session`、`target`、`last_used`、`state`——`alive`/`dead`）；`sessions.android` 保持原有的明细，`sessions.ios` 仍是 ID 列表，两个键都不变。顶层 `reclaimed` 是服务端自动关闭的会话历史（`session`、`backend`、`reason`、`at`），`reason` 取值：`idle`（空闲回收）、`dead`（页面宿主进程已退出）、`close_all`（`runvm_close_all`）。
 
 ## Android
 
@@ -72,6 +75,8 @@ layout: page
 | `webbrain` | `session`、`action`、`ref_id`、`text`、… | 用 WebBrain 的页面控制脚本驱动页面（见下） |
 
 `h5_open` 的 `env` 会以 `webframe.env` 暴露给页面；`ephemeral` 默认 `true`，cookie/存储/缓存只留内存。
+
+页面宿主进程自己退出（页面 `exit()`、崩溃、被杀）时，会话会被自动从注册表移除并释放配额，不需要手动 `h5_close`；这类回收会记进 `runvm_status` 的 `reclaimed`（`reason: "dead"`）。
 
 `h5_eval` 返回的是格式化文本：字符串带引号，对象是 JSON。要结构化数据就在 JS 里 `JSON.stringify`。
 
