@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dolfly/runvm/internal/android"
@@ -38,6 +39,19 @@ type Set struct {
 	Android *session.Store[*android.Session]
 	IOS     *session.Store[*ios.Session]
 	H5      *session.Store[*h5.Session]
+
+	reclaimMu sync.Mutex
+	reclaimed []Reclaimed
+}
+
+// Reclaimed records one session the server closed on its own — idle reaping,
+// dead-page sweep, or runvm_close_all — so runvm_status can explain why a
+// session the model still names is gone.
+type Reclaimed struct {
+	Session string `json:"session"`
+	Backend string `json:"backend"`
+	Reason  string `json:"reason"`
+	At      string `json:"at"`
 }
 
 // New builds the MCP server and the session set it operates on.
@@ -52,10 +66,26 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	srv := mcp.NewServer("runvm", version)
 
 	srv.Add(mcp.Tool{
-		Name:        "runvm_status",
-		Description: "Report which backends are live and how many sessions are open. Cheap: does not boot anything.",
+		Name: "runvm_status",
+		Description: "Report which backends are live, how many sessions are open, and enough per-session detail " +
+			"(target, last_used, alive/dead state) to decide which session to close when the quota is full. " +
+			"The \"reclaimed\" list records sessions the server closed on its own — idle reaping, a page host " +
+			"that died, or runvm_close_all — with the reason and time. Cheap: does not boot anything.",
 		InputSchema: object(nil),
 		Handler:     s.status,
+	})
+
+	srv.Add(mcp.Tool{
+		Name: "runvm_close_all",
+		Description: "Close every live session in one call, or only one backend, to release the session quota " +
+			"(RUNVM_MAX_SESSIONS) in bulk instead of closing sessions one by one. Pass no argument to close " +
+			"android, ios and h5 together. runvm_status reflects the release immediately, and the closed sessions " +
+			"appear under its \"reclaimed\" history.",
+		InputSchema: object(map[string]any{
+			"backends": array("Backends to close: \"android\", \"ios\" and/or \"h5\". Empty or omitted closes all three.",
+				map[string]any{"type": "string"}),
+		}),
+		Handler: s.closeAll,
 	})
 
 	srv.Add(mcp.Tool{
@@ -534,15 +564,131 @@ conversation stays light.`, task, open, steps), nil
 }
 
 // reserved reports whether another session would exceed the configured cap.
+// It first sweeps dead h5 sessions, so a page that died quietly does not keep
+// holding a slot against the next h5_open.
 func (s *Set) reserved() error {
+	s.sweepDead()
 	if s.Limits.MaxSessions <= 0 {
 		return nil
 	}
-	if n := s.Android.Len() + s.IOS.Len() + s.H5.Len(); s.Limits.MaxSessions > 0 && n >= s.Limits.MaxSessions {
-		return fmt.Errorf("session limit reached (%d); close one with android_close/ios_close/h5_close, "+
-			"or raise RUNVM_MAX_SESSIONS", s.Limits.MaxSessions)
+	if n := s.Android.Len() + s.IOS.Len() + s.H5.Len(); n >= s.Limits.MaxSessions {
+		return fmt.Errorf("session limit reached (%d); close one with android_close/ios_close/h5_close or runvm_close_all, "+
+			"or raise RUNVM_MAX_SESSIONS — live sessions: %s", s.Limits.MaxSessions, s.sessionSummary())
 	}
 	return nil
+}
+
+// sweepDead removes h5 sessions whose page host process has already exited.
+// Each removal is guarded by Store.Delete, so a session is released exactly
+// once no matter how many sweeps race. It also reaps the zombie process.
+func (s *Set) sweepDead() int {
+	removed := 0
+	for _, id := range s.H5.IDs() {
+		sess, ok := s.H5.Get(id)
+		if !ok || sess.Alive() {
+			continue
+		}
+		if gone, _ := s.closeH5(id); gone {
+			s.recordReclaim("h5", id, "dead")
+			removed++
+		}
+	}
+	return removed
+}
+
+// closeH5 removes id from the h5 store and stops its host process, exactly
+// once. It returns true if this call performed the removal. h5_close, the
+// host-exit watcher, the dead-session sweep and runvm_close_all all converge
+// here; Store.Delete and Session.Close are each idempotent, so concurrent
+// callers cannot double-close.
+func (s *Set) closeH5(id string) (bool, error) {
+	sess, gone := s.H5.Delete(id)
+	if !gone {
+		return false, nil
+	}
+	return true, sess.Close()
+}
+
+// watchH5 removes an h5 session as soon as its page host exits, without
+// waiting for the next h5_open or the idle reaper to notice.
+func (s *Set) watchH5(id string, sess *h5.Session) {
+	go func() {
+		<-sess.Done()
+		if gone, _ := s.closeH5(id); gone {
+			s.recordReclaim("h5", id, "dead")
+		}
+	}()
+}
+
+// sessionSummary lists live sessions in a form the model can act on: which
+// session IDs exist, and for h5 which target each one holds.
+func (s *Set) sessionSummary() string {
+	parts := make([]string, 0, s.Android.Len()+s.IOS.Len()+s.H5.Len())
+	parts = append(parts, s.Android.IDs()...)
+	parts = append(parts, s.IOS.IDs()...)
+	for _, id := range s.H5.IDs() {
+		if sess, ok := s.H5.Get(id); ok {
+			parts = append(parts, fmt.Sprintf("%s (%s)", id, sess.Target()))
+		} else {
+			parts = append(parts, id)
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// maxReclaimed bounds the reclaim history so a long-running server never grows
+// it without bound.
+const maxReclaimed = 200
+
+// recordReclaim appends one entry to the bounded reclaim history.
+func (s *Set) recordReclaim(backend, id, reason string) {
+	s.reclaimMu.Lock()
+	defer s.reclaimMu.Unlock()
+	s.reclaimed = append(s.reclaimed, Reclaimed{
+		Session: id,
+		Backend: backend,
+		Reason:  reason,
+		At:      time.Now().UTC().Format(time.RFC3339),
+	})
+	if len(s.reclaimed) > maxReclaimed {
+		s.reclaimed = s.reclaimed[len(s.reclaimed)-maxReclaimed:]
+	}
+}
+
+// reclaimedSnapshot returns a copy of the reclaim history, oldest first.
+func (s *Set) reclaimedSnapshot() []Reclaimed {
+	s.reclaimMu.Lock()
+	defer s.reclaimMu.Unlock()
+	out := make([]Reclaimed, len(s.reclaimed))
+	copy(out, s.reclaimed)
+	return out
+}
+
+// h5Details renders each h5 session with enough to decide whether to close it:
+// target, last_used, and whether the host process is still alive.
+func (s *Set) h5Details() []map[string]any {
+	ids := s.H5.IDs()
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		sess, ok := s.H5.Get(id)
+		if !ok {
+			continue
+		}
+		state := "alive"
+		if !sess.Alive() {
+			state = "dead"
+		}
+		out = append(out, map[string]any{
+			"session":   id,
+			"target":    sess.Target(),
+			"last_used": sess.LastUsed().UTC().Format(time.RFC3339),
+			"state":     state,
+		})
+	}
+	return out
 }
 
 // StartReaper closes sessions left idle for longer than the configured
@@ -587,6 +733,7 @@ func (s *Set) reap(now time.Time) int {
 		}
 		if _, gone := s.Android.Delete(id); gone {
 			_ = sess.Close()
+			s.recordReclaim("android", id, "idle")
 			closed++
 		}
 	}
@@ -597,6 +744,7 @@ func (s *Set) reap(now time.Time) int {
 		}
 		if _, gone := s.IOS.Delete(id); gone {
 			_ = sess.Close()
+			s.recordReclaim("ios", id, "idle")
 			closed++
 		}
 	}
@@ -605,8 +753,8 @@ func (s *Set) reap(now time.Time) int {
 		if !ok || !sess.LastUsed().Before(cutoff) {
 			continue
 		}
-		if _, gone := s.H5.Delete(id); gone {
-			_ = sess.Close()
+		if gone, _ := s.closeH5(id); gone {
+			s.recordReclaim("h5", id, "idle")
 			closed++
 		}
 	}
@@ -624,6 +772,62 @@ func (s *Set) CloseAll() {
 	for _, w := range s.H5.CloseAll() {
 		_ = w.Close()
 	}
+}
+
+// closeAll is the runvm_close_all handler: it closes every session in the
+// selected backends and reports the released IDs.
+func (s *Set) closeAll(_ context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Backends []string `json:"backends"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	doAndroid, doIOS, doH5 := false, false, false
+	if len(a.Backends) == 0 {
+		doAndroid, doIOS, doH5 = true, true, true
+	}
+	for _, b := range a.Backends {
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case "android":
+			doAndroid = true
+		case "ios":
+			doIOS = true
+		case "h5":
+			doH5 = true
+		default:
+			return nil, fmt.Errorf("runvm_close_all: unknown backend %q (android|ios|h5)", b)
+		}
+	}
+
+	closed := make([]string, 0)
+	if doAndroid {
+		for _, id := range s.Android.IDs() {
+			if sess, gone := s.Android.Delete(id); gone {
+				_ = sess.Close()
+				s.recordReclaim("android", id, "close_all")
+				closed = append(closed, id)
+			}
+		}
+	}
+	if doIOS {
+		for _, id := range s.IOS.IDs() {
+			if sess, gone := s.IOS.Delete(id); gone {
+				_ = sess.Close()
+				s.recordReclaim("ios", id, "close_all")
+				closed = append(closed, id)
+			}
+		}
+	}
+	if doH5 {
+		for _, id := range s.H5.IDs() {
+			if gone, _ := s.closeH5(id); gone {
+				s.recordReclaim("h5", id, "close_all")
+				closed = append(closed, id)
+			}
+		}
+	}
+	return map[string]any{"closed": closed, "count": len(closed)}, nil
 }
 
 func (s *Set) status(context.Context, json.RawMessage) (any, error) {
@@ -652,8 +856,9 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 		"sessions": map[string]any{
 			"android": s.androidDetails(),
 			"ios":     s.IOS.IDs(),
-			"h5":      s.H5.IDs(),
+			"h5":      s.h5Details(),
 		},
+		"reclaimed": s.reclaimedSnapshot(),
 	}, nil
 }
 
@@ -757,6 +962,7 @@ func (s *Set) androidSymbols(_ context.Context, raw json.RawMessage) (any, error
 	if err != nil {
 		return nil, err
 	}
+	sess.Touch()
 	all, err := android.Exports(sess.Path())
 	if err != nil {
 		return nil, fmt.Errorf("android_symbols: %w", err)
@@ -934,6 +1140,7 @@ func (s *Set) iosSymbols(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	sess.Touch()
 	path := sess.Path()
 	all, err := ios.Exports(path)
 	if err != nil {
@@ -970,6 +1177,7 @@ func (s *Set) iosImports(_ context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	sess.Touch()
 	imports, err := ios.Imports(sess.Path())
 	if err != nil {
 		return nil, err
@@ -1101,6 +1309,7 @@ func (s *Set) androidJavaStubs(_ context.Context, raw json.RawMessage) (any, err
 	if err != nil {
 		return nil, err
 	}
+	sess.Touch()
 	return map[string]any{"stubs": sess.JavaStubs()}, nil
 }
 
@@ -1163,6 +1372,7 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	id := s.H5.Add(sess)
+	s.watchH5(id, sess)
 	if a.Webbrain != nil && *a.Webbrain {
 		mcp.Notify(ctx, 0.8, "h5_open: injecting webbrain page scripts")
 		if err := h5.InjectWebbrain(ctx, sess); err != nil {
@@ -1401,12 +1611,12 @@ func (s *Set) h5Close(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
-	sess, ok := s.H5.Delete(a.Session)
-	if !ok {
-		return nil, fmt.Errorf("h5_close: unknown session %q", a.Session)
-	}
-	if err := sess.Close(); err != nil {
+	gone, err := s.closeH5(a.Session)
+	if err != nil {
 		return nil, fmt.Errorf("h5_close: %w", err)
+	}
+	if !gone {
+		return nil, fmt.Errorf("h5_close: unknown session %q", a.Session)
 	}
 	return map[string]any{"closed": a.Session}, nil
 }
