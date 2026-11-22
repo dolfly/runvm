@@ -28,6 +28,7 @@ import (
 	"github.com/dolfly/runvm/internal/doctor"
 	"github.com/dolfly/runvm/internal/h5"
 	"github.com/dolfly/runvm/internal/mcp"
+	"github.com/dolfly/runvm/internal/resources"
 	"github.com/dolfly/runvm/internal/tools"
 )
 
@@ -82,6 +83,12 @@ func serve() {
 	defer stop()
 
 	server, set := tools.New(version, limitsFromEnv())
+	res, err := resourcesFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "runvm:", err)
+		os.Exit(1)
+	}
+	set.Resources = res
 	set.StartReaper(ctx)
 	// Sessions hold emulators and child processes; a clean shutdown must not
 	// leave either behind.
@@ -119,6 +126,12 @@ func serveHTTP(args []string) {
 	defer stop()
 
 	server, set := tools.New(version, limitsFromEnv())
+	res, err := resourcesFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "runvm:", err)
+		os.Exit(2)
+	}
+	set.Resources = res
 	set.StartReaper(ctx)
 	defer set.CloseAll()
 
@@ -152,6 +165,15 @@ func limitsFromEnv() tools.Limits {
 		MaxSessions: envInt("RUNVM_MAX_SESSIONS", 8),
 		IdleTimeout: envDuration("RUNVM_IDLE_TIMEOUT", 30*time.Minute),
 	}
+}
+
+// resourcesFromEnv builds the writable resource store behind runvm://files/.
+func resourcesFromEnv() (*resources.Store, error) {
+	max, err := resources.ParseSize(envOr("RUNVM_RESOURCES_MAX_SIZE", "64MiB"))
+	if err != nil {
+		return nil, fmt.Errorf("bad RUNVM_RESOURCES_MAX_SIZE: %w", err)
+	}
+	return resources.New(envOr("RUNVM_RESOURCES_DIR", resources.DefaultDir), max)
 }
 
 func envInt(key string, def int) int {
@@ -200,6 +222,8 @@ environment:
   RUNVM_TOKEN      bearer token required by runvm http
   RUNVM_ASSETS     path to golem's bionic sysroot (assets/android/sdk23)
   RUNVM_ENGINE   default CPU backend, e.g. unicorn
+  RUNVM_RESOURCES_DIR   writable resource root (default ./runvm-resources)
+  RUNVM_RESOURCES_MAX_SIZE  per-file upload/write cap, e.g. 64MiB (default 64MiB)
 
 The server speaks JSON-RPC 2.0 over stdio. Point an MCP client at the binary:
 

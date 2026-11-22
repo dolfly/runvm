@@ -14,9 +14,21 @@ layout: page
 | 工具 | 作用 |
 |---|---|
 | `runvm_status` | 后端可用性、限制、活跃会话；h5 会话逐条给 `target`/`last_used`/存活状态，`reclaimed` 记录被自动回收的会话。不启动任何东西 |
+| `runvm_upload` | 把本机文件上传进可写资源空间（`runvm://files/`），返回 URI / 字节数 / sha256 |
+| `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源，返回 URI / 字节数 / sha256 |
 | `runvm_close_all` | 一次关闭指定后端（`android`/`ios`/`h5`）或全部会话，批量释放 `RUNVM_MAX_SESSIONS` 配额 |
 
 `runvm_status` 的 `sessions.h5` 是逐会话明细（`session`、`target`、`last_used`、`state`——`alive`/`dead`）；`sessions.android` 保持原有的明细，`sessions.ios` 仍是 ID 列表，两个键都不变。顶层 `reclaimed` 是服务端自动关闭的会话历史（`session`、`backend`、`reason`、`at`），`reason` 取值：`idle`（空闲回收）、`dead`（页面宿主进程已退出）、`close_all`（`runvm_close_all`）。
+
+**可写资源与失败语义**：`runvm_upload` 的参数是 `path`（本机文件路径，必填）+ `target`（可选相对路径/名字，默认取源文件 base name）；`runvm_write` 的参数是 `target`（必填）+ `content`（文本）或 `base64`（二进制），两者二选一。两者都返回 `{"uri", "bytes", "sha256", "name"}`，不是一句 "ok"。
+
+失败时是 `result.isError = true` 的可读错误，不假装成功：
+
+- 路径穿越（`..`、绝对路径、符号链接逃出资源根）→ `resource path escapes the resources root`；
+- 超限 → `resource exceeds the size limit`（默认 64MiB，可配 `RUNVM_RESOURCES_MAX_SIZE`）；
+- 资源存储未配置 → `resource store is not configured`。
+
+写入落在资源根内，目录 0700、文件 0600；空文件与二进制文件都按原样处理。
 
 ## Android
 
@@ -110,8 +122,11 @@ MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`�
 |---|---|---|
 | `runvm://status` | application/json | 后端、限制、会话 |
 | `runvm://tools` | application/json | 工具目录与 schema |
+| `runvm://files/<相对路径>` | 按内容探测 | 可写资源：文本走 `text`，二进制走 `blob`；上传/写入后才出现 |
 | `runvm://screenshot/<session>` | image/png | 最近一次截图，截过才存在 |
 | `runvm://pdf/<session>` | application/pdf | 最近一次 PDF，导出过才存在 |
+
+`runvm://files/` 是给 HTTP 控制台（阶段 2）定下的契约：`resources/list` 会列出磁盘上真实存在的可写资源（带大小与修改时间），`resources/read` 每次从磁盘读，所以改写后立即反映新内容。
 
 ## 提示词
 

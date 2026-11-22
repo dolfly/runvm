@@ -19,13 +19,13 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"android_
 
 <video src="https://github.com/dolfly/runvm/raw/main/assets/video/runvm-promo.mp4" poster="https://github.com/dolfly/runvm/raw/main/assets/video/runvm-promo-poster.png" controls width="100%"></video>
 
-35 秒产品宣传片：加载 AArch64 `.so` 直接调用 `fib`、`h5_eval` 读回真实 DOM、22 个 MCP 工具一览。视频源文件见 [assets/video/runvm-promo.mp4](assets/video/runvm-promo.mp4)。
+35 秒产品宣传片：加载 AArch64 `.so` 直接调用 `fib`、`h5_eval` 读回真实 DOM、24 个 MCP 工具一览。视频源文件见 [assets/video/runvm-promo.mp4](assets/video/runvm-promo.mp4)。
 
 ## 架构
 
 ```mermaid
 flowchart TB
-  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>22 个工具"]
+  M["模型 / MCP 客户端"] -->|"JSON-RPC 2.0 over stdio"| S["runvm mcp<br/>24 个工具"]
   S --> REG["session.Store<br/>android-N / ios-N / h5-N"]
   REG --> A["android 后端<br/>in-process"]
   REG --> I["ios 后端<br/>in-process"]
@@ -137,6 +137,8 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | 工具 | 作用 |
 |---|---|
 | `runvm_status` | 各后端是否可用、有几个会话、逐会话 `target`/`last_used`/存活状态,以及 `reclaimed` 自动回收历史(**不启动任何东西**) |
+| `runvm_upload` | 把本机文件上传进可写资源空间 `runvm://files/<路径>`,返回 URI / 字节数 / sha256 |
+| `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源 |
 | `runvm_close_all` | 一次关闭指定后端或全部会话,批量释放 `RUNVM_MAX_SESSIONS` 配额 |
 | `android_open` | 加载 `.so`,跑 init,返回 `android-N` |
 | `android_symbols` | 列出导出函数(直接读 ELF,不依赖会话能否启动) |
@@ -186,6 +188,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 |---|---|
 | `runvm://status` | 后端、限制、活跃会话(JSON) |
 | `runvm://tools` | 全部工具与 input schema(JSON) |
+| `runvm://files/<路径>` | 可写资源(文本走 text,二进制走 blob),上传/写入后才出现 |
 | `runvm://screenshot/<session>` | 该会话最近一次截图(PNG blob),截过之后才出现 |
 
 **提示词**(带参数的模板,客户端 `prompts/get` 取):`smoke-test-page`(url / expectation)——加载、断言、截图、收 console、关闭;`inspect-native-lib`(so / symbol)——加载 .so、列导出、调一个函数。
@@ -246,6 +249,8 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
 | `RUNVM_ASSETS` | golem 的 bionic sysroot(`assets/android/sdk23`);不设则用 golem 模块内路径 |
 | `RUNVM_ENGINE` | `android_open` 未指定 `engine` 时的默认后端 |
 | `GOLEM_UNICORN` | 显式指定 `libunicorn` 路径(golem 读取) |
+| `RUNVM_RESOURCES_DIR` | 可写资源根目录(默认工作目录下 `runvm-resources`,不存在自动建,0700) |
+| `RUNVM_RESOURCES_MAX_SIZE` | 单个上传/写入上限,如 `64MiB`(默认 64MiB) |
 
 ## 限制,以及它**不是**什么
 
@@ -279,8 +284,9 @@ make doctor      # 自检要单独构建：golem 靠二进制里的模块路径�
 ```
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
-internal/tools/   22 个工具的参数校验与调用编排
+internal/tools/   24 个工具的参数校验与调用编排
 internal/session/ 会话注册表(泛型)
+internal/resources/ 可写资源存储(runvm://files/ 背后的磁盘根)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/ios/     golem 会话池 + Mach-O 导出/导入表(无 JNI)
 internal/h5/      webframe 宿主(子进程)与驱动
