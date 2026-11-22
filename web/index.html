@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>runvm · console</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script>
+      // First-paint language preset: read the cookie before the styles load so
+      // the shell renders at the right line-height without a flash (§11.1).
+      (function () {
+        var m = document.cookie.match(/(?:^|;\s*)runvm_lang=([^;]+)/);
+        var lang = m ? m[1] : (navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh-CN" : "en";
+        document.documentElement.lang = lang;
+        document.documentElement.dataset.lang = lang;
+      })();
+    </script>
+    <style>
+      /* Minimal first-paint skeleton so an empty white flash never shows while
+         the JS bundle loads. All real styles live in tokens.css/base.css. */
+      html, body { margin: 0; padding: 0; background: #fdfcfc; }
+      #boot { position: fixed; inset: 0; display: grid; place-items: center;
+              color: #8a8787; font: 400 13px/20px system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="boot">runvm</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

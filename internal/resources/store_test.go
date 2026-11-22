@@ -93,6 +93,13 @@ func TestUploadListRead(t *testing.T) {
 	if list[0].ModTime.IsZero() {
 		t.Error("listed ModTime zero")
 	}
+	// Listing must carry the sha256 the console file-info view shows.
+	if len(list[0].Sha256) != 64 {
+		t.Errorf("listed Sha256 = %q, want 64 hex chars", list[0].Sha256)
+	}
+	if list[0].Sha256 != m.Sha256 {
+		t.Errorf("listed Sha256 = %q, want %q (upload result)", list[0].Sha256, m.Sha256)
+	}
 
 	got, err := s.Read("sub/payload.bin")
 	if err != nil {

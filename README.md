@@ -244,7 +244,7 @@ RUNVM_TOKEN=$(openssl rand -hex 16) ./bin/runvm http -addr 0.0.0.0:8765
 
 ### 控制台(SPA)
 
-`runvm http` 同时在 `/` 下提供一套内嵌的单页控制台(静态资源 `go:embed` 进二进制,不依赖外网 CDN):
+`runvm http` 同时在 `/` 下提供一套内嵌的单页控制台。前端是 Vite 构建链(`web/`),构建产物提交进 `internal/console/static/dist/` 并由 `go:embed` 打进单个二进制——**运行时不需要 Node、不请求任何外网资源**(零 CDN、零在线字体/图标);`make build` / `go build` / Dockerfile 在没装 Node 的环境里照常编译。
 
 ```bash
 # 未设置 RUNVM_CONSOLE_PASSWORD 时,启动会生成随机密码并打到 stderr,没有内置默认密码
@@ -253,18 +253,24 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/ru
 # runvm: console on http://127.0.0.1:8765/ (login: admin)
 ```
 
-控制台的**任何数据都要登录后才能看到**:未登录一律 `401`;登录成功下发 `HttpOnly` + `SameSite` 会话 cookie,登出使其失效。控制台登录与 MCP 的 Bearer token 相互独立,控制台不是绕过 MCP 鉴权的入口。
+控制台的**任何数据接口未登录一律 `401`**;登录成功下发 `HttpOnly` + `SameSite` 会话 cookie,登出使其失效。控制台登录与 MCP 的 Bearer token 相互独立,控制台不是绕过 MCP 鉴权的入口。未登录访问任意路径(含 `/resources`、`/resources/files`、`/debug` 等深链)都会渲染登录页,登录后回到原路径(`?next=`)。
 
-控制台四个页签:
+三段顶层导航,资源管理下带四个二级页:
 
-| 页签 | 内容 |
+| 页 | 内容 |
 |---|---|
-| 状态 | 后端可用性、各类会话数、活跃会话列表,每 3 秒自动刷新 |
-| 资源 | 列出 runvm:// 资源,区分只读/可写;文本直接看,二进制预览/下载;可写文本在线编辑保存(保存后 `resources/read` 立即读到新内容) |
-| 上传 | 网页上传本地文件进 `runvm://files/`,与 `runvm_upload` 同一套校验与大小上限 |
-| MCP 调试 | 调 runvm 自己的 MCP server,但**只读**:`initialize`/`tools/list`/`tools/call`/`resources/list`/`resources/read`/`prompts/list`/`prompts/get` 结果原样展示,能看到每次请求/响应的 JSON-RPC 原文,并带 Inspector 的 4 条 schema 可移植性检查(`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`) |
+| 系统总览 `/` | 后端可用性、限额、活跃会话列表,每 3 秒自动刷新 |
+| 资源管理-检索 `/resources` | 跨类型关键词检索(工具 / 截图 / 文件),结果分组,点击跳到对应子页并选中 |
+| 资源管理-工具 `/resources/tools` | `runvm://tools` 的 24 个工具 + input schema,可检索、可看参数表与 schema |
+| 资源管理-截图 `/resources/screenshots` | `runvm://screenshot/<session>` 的 PNG,列表 + 预览 + 下载 |
+| 资源管理-文件 `/resources/files` | `runvm://files/` 的内置文件浏览器(目录树 + 文件列表 + 按格式打开) |
+| MCP 调试 `/debug` | 调 runvm 自己的 MCP server,但**只读**(见下) |
 
-调试页的 `tools/call` 走**白名单**:只有确实只读的工具(`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`)可调;写工具(`runvm_write`/`runvm_upload`)与所有状态变更工具(含 `*_open`/`*_close`/`runvm_close_all`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`)只列出来供参考,没有调用入口。调试页连的是进程内 runvm 自己,不给写 runvm 状态的入口。
+**文件浏览器按格式打开**:图片(`png/jpg/jpeg/gif/webp/bmp/svg`)预览;`json` 树视图 + 编辑(保存前 `JSON.parse` 校验,非法 JSON 报错并阻止保存);`md` 预览 + 编辑;`txt`/文本类直接编辑;其它二进制显示大小 / MIME / sha256 / 修改时间并下载。编辑保存走 `PUT /api/resources/file`(复用 `Store.Write`),保存后 MCP `resources/read` 立即读到新内容;上传并入文件页(拖拽或选择文件),与 `runvm_upload` 同一套校验与上限。只读资源(`runvm://tools` / `runvm://status` / 截图 / pdf)在文件浏览器里不给编辑入口,视觉上与可写资源区分。
+
+**中英文(i18n)**:所有界面文案走 token(`web/locales/zh-CN.json` / `en-US.json`,构建期 inline),顶栏右侧「中文 / EN」分段切换,切换不刷新整页并记住偏好(localStorage + cookie);工具名 / 参数名 / schema / URI / 时间戳 / 后端原始错误一律不翻译。字体用系统字体栈(`Sarasa Mono SC` 等 CJK 等宽字体仅作为回退,**不随二进制打包**)。
+
+调试页的 `tools/call` 走**白名单**(`debugCallableTools`):只有确实只读的工具(`runvm_status` / `android_symbols` / `android_java_stubs` / `ios_symbols` / `ios_imports` / `h5_console`)可调;写工具(`runvm_write`/`runvm_upload`)与所有状态变更工具(含 `*_open`/`*_close`/`runvm_close_all`/`android_hook`/`android_java_stub`/`h5_eval`/`h5_pdf`/`h5_screenshot`/`webbrain`)在左栏显示为「不可调用」、不给调用入口。调试页连的是进程内 runvm 自己,不给写 runvm 状态的入口。结果区带 Inspector 的 4 条 schema 可移植性检查(`boolean-schema`/`type-union`/`untyped-schema`/`remote-ref`)。
 
 ## 环境变量
 
@@ -318,6 +324,7 @@ internal/android/ golem 会话池 + ELF 导出表 + JNI 桩
 internal/ios/     golem 会话池 + Mach-O 导出/导入表(无 JNI)
 internal/h5/      webframe 宿主(子进程)与驱动
 internal/doctor/  真实探测各后端
+web/              控制台前端(Vite + 原版 TS,产出内嵌进 internal/console/static/dist/)
 ```
 
 ## 依赖与致谢

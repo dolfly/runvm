@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 """End-to-end check against a live runvm binary.
 
 Usage:

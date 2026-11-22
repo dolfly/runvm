@@ -19,8 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -102,12 +104,6 @@ func New(o Options) http.Handler {
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case "/", "/index.html":
-		h.serveStatic(w, r, "index.html")
-	case "/console.js":
-		h.serveStatic(w, r, "console.js")
-	case "/console.css":
-		h.serveStatic(w, r, "console.css")
 	case "/api/login":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -121,41 +117,89 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleLogout(w, r)
 	default:
-		if !strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if !h.authorized(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			h.handleAPI(w, r)
 			return
 		}
-		if !h.authorized(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		h.handleAPI(w, r)
+		// Anything else is the SPA: the built dist tree, with index.html as
+		// the fallback for the per-page routes (§6.3) so a refresh or a shared
+		// deep link does not land on a 404.
+		h.serveSPA(w, r)
 	}
 }
 
-func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, name string) {
-	// Serve one embedded file by name. The embed filesystem has no parent
-	// directory and no symlinks, so there is nothing to traverse out of.
-	data, err := staticFS.ReadFile("static/" + name)
+// serveSPA serves the embedded Vite build. The embed filesystem has no parent
+// directory and no symlinks, so nothing can traverse out of it; the path is
+// still cleaned and traversal is refused explicitly rather than left to
+// ReadFile's error. Requests that resolve to a real file are served with their
+// content type; extension-less paths (the SPA routes) fall back to index.html.
+func (h *Handler) serveSPA(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name, ok := cleanStaticPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if data, err := staticFS.ReadFile("static/dist/" + name); err == nil {
+		writeStatic(w, r, name, data)
+		return
+	}
+	// Not a real file. A missing hashed asset (it has an extension) is a real
+	// 404; an extension-less path is an SPA route, so serve the shell.
+	if strings.Contains(path.Base(name), ".") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := staticFS.ReadFile("static/dist/index.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", staticType(name))
-	_, _ = w.Write(data)
+	writeStatic(w, r, "index.html", data)
 }
 
-func staticType(name string) string {
-	switch {
-	case strings.HasSuffix(name, ".html"):
-		return "text/html; charset=utf-8"
-	case strings.HasSuffix(name, ".js"):
-		return "text/javascript; charset=utf-8"
-	case strings.HasSuffix(name, ".css"):
-		return "text/css; charset=utf-8"
-	default:
-		return "application/octet-stream"
+// cleanStaticPath maps a request path to a name inside the embedded dist tree.
+// It rejects anything that could escape the tree: absolute paths, "..",
+// backslashes and NUL bytes.
+func cleanStaticPath(p string) (string, bool) {
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return "index.html", true
 	}
+	if strings.ContainsAny(p, "\\\x00") {
+		return "", false
+	}
+	clean := path.Clean(p)
+	if clean != p || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", false
+	}
+	return clean, true
+}
+
+// writeStatic writes one embedded asset with a content type derived from its
+// extension, falling back to octet-stream for anything unknown.
+func writeStatic(w http.ResponseWriter, r *http.Request, name string, data []byte) {
+	ct := mime.TypeByExtension(path.Ext(name))
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	// The shell must never be cached stale (the login page and the live data
+	// are behind it); hashed assets are immutable by filename but keeping a
+	// single no-cache policy is simpler and correct for a local console.
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_, _ = w.Write(data)
 }
 
 func (h *Handler) handleAPI(w http.ResponseWriter, r *http.Request) {
@@ -290,14 +334,34 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleResourcesList lists every resource the MCP server exposes, marking the
-// writable runvm://files/ entries. The catalog comes straight from the
-// in-process server, so it can never drift from resources/list.
+// writable runvm://files/ entries and attaching the structured sha256 and
+// modification time the file-info view and status bar need. The MCP catalog
+// only carries uri/name/description/mimeType/size, so those two fields come
+// straight from the store's own listing.
+//
+// For runvm://files/* entries the `name` field is rewritten to the relative
+// path under the resources root. The MCP catalog's name is a display label
+// ("Resource <path>"), and the console's file browser treats `name` as the
+// path — a display label there would make tree/save/select all target the
+// wrong location (DO-143 QA regression).
 func (h *Handler) handleResourcesList(w http.ResponseWriter, r *http.Request) {
 	result, rerr := h.dispatch(r.Context(), "resources/list", nil)
 	if rerr != nil {
 		http.Error(w, rerr.Message, http.StatusInternalServerError)
 		return
 	}
+
+	// Index the store's files by name once, so the console can fill in sha256
+	// and mod_time without hashing per entry.
+	fileMeta := map[string]resources.Meta{}
+	if h.store != nil {
+		if metas, err := h.store.List(); err == nil {
+			for _, m := range metas {
+				fileMeta[m.Name] = m
+			}
+		}
+	}
+
 	resourcesRaw, _ := result["resources"].([]any)
 	out := make([]map[string]any, 0, len(resourcesRaw))
 	for _, item := range resourcesRaw {
@@ -306,7 +370,16 @@ func (h *Handler) handleResourcesList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		uri, _ := entry["uri"].(string)
-		entry["writable"] = strings.HasPrefix(uri, "runvm://files/")
+		writable := strings.HasPrefix(uri, "runvm://files/")
+		entry["writable"] = writable
+		if writable {
+			name := strings.TrimPrefix(uri, "runvm://files/")
+			entry["name"] = name
+			if m, ok := fileMeta[name]; ok {
+				entry["sha256"] = m.Sha256
+				entry["mod_time"] = m.ModTime.UTC().Format(time.RFC3339)
+			}
+		}
 		out = append(out, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"resources": out})

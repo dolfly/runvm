@@ -40,6 +40,94 @@ jobs:
       - name: test
         run: go test ./...
 
+  web:
+    # The frontend ships as committed build output (no Node at Go build time),
+    # so this job proves the source still reproduces that output exactly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        working-directory: web
+        run: npm ci
+
+      - name: typecheck
+        working-directory: web
+        run: npm run check
+
+      - name: locale key parity
+        working-directory: web
+        run: npm run check:locales
+
+      - name: build
+        working-directory: web
+        run: npm run build
+
+      - name: drift check
+        # `git status --porcelain` sees untracked files too, unlike
+        # `git diff --exit-code` which only compares tracked files and would
+        # silently miss a brand-new hashed asset.
+        run: |
+          if [ -n "$(git status --porcelain -- internal/console/static/dist)" ]; then
+            echo "frontend dist drifted from committed build; run 'make web' and commit the output"
+            git status --porcelain -- internal/console/static/dist
+            exit 1
+          fi
+
+  console-e2e:
+    # The console is a real SPA; API-level checks cannot catch a save landing
+    # on the wrong path. This job boots `runvm http` and drives the real UI in
+    # a real Chromium (Playwright), asserting DOM and resource content — not
+    # just HTTP status.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: build runvm
+        run: CGO_ENABLED=0 go build -o bin/runvm ./cmd/runvm
+
+      - name: frontend deps + chromium
+        working-directory: web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: console e2e (real browser)
+        working-directory: web
+        run: |
+          set -e
+          RESDIR=$(mktemp -d)
+          mkdir -p "$RESDIR/docs"
+          printf '{"hello":"world"}' > "$RESDIR/docs/e2e.json"
+          printf '# Hello\n\nThis is **markdown**.\n' > "$RESDIR/docs/readme.md"
+          printf 'plain text line\n' > "$RESDIR/docs/notes.txt"
+          RUNVM_RESOURCES_DIR="$RESDIR" RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=secret123 \
+            RUNVM_HTTP_ADDR=127.0.0.1:18767 ../bin/runvm http >/tmp/runvm-console.log 2>&1 &
+          SRV=$!
+          trap 'kill $SRV 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:18767/healthz && break
+            sleep 0.5
+          done
+          BASE_URL=http://127.0.0.1:18767 npx playwright test
+
   e2e:
     # The unit tests never boot an emulator or a browser, so this job is the
     # only thing standing between us and "works on my machine": real WebKit, a

@@ -371,3 +371,74 @@ func TestMCPEndpointsPassThrough(t *testing.T) {
 		t.Fatalf("GET /healthz = %d, want 200", resp.StatusCode)
 	}
 }
+
+func TestResourceListCarriesSha256AndModTime(t *testing.T) {
+	ts, _, store := newConsole(t, "admin", "p", resources.DefaultMaxSize)
+	cookie := login(t, ts.URL, "admin", "p")
+
+	if _, err := store.Write("docs/report.json", []byte(`{"ok": true}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, list := doReq(t, http.MethodGet, ts.URL+"/api/resources", cookie, nil, "")
+	found := false
+	for _, item := range list["resources"].([]any) {
+		entry := item.(map[string]any)
+		if entry["uri"] != "runvm://files/docs/report.json" {
+			continue
+		}
+		found = true
+		if entry["writable"] != true {
+			t.Errorf("writable = %v", entry["writable"])
+		}
+		// `name` must be the relative path, not the MCP display label
+		// "Resource docs/report.json": the console file browser treats name as
+		// the path (DO-143 QA regression).
+		if entry["name"] != "docs/report.json" {
+			t.Errorf("name = %q, want %q", entry["name"], "docs/report.json")
+		}
+		sha, _ := entry["sha256"].(string)
+		if len(sha) != 64 {
+			t.Errorf("sha256 = %q, want 64 hex chars", sha)
+		}
+		if mt, _ := entry["mod_time"].(string); mt == "" {
+			t.Errorf("mod_time empty")
+		}
+	}
+	if !found {
+		t.Fatalf("file entry missing from list: %v", list)
+	}
+}
+
+func TestSPADeepLinksServeShell(t *testing.T) {
+	ts, _, _ := newConsole(t, "admin", "p", resources.DefaultMaxSize)
+
+	// The per-page routes must render the shell, not a Go 404, so a refresh or
+	// a shared deep link works without any server-side routing table.
+	for _, path := range []string{"/", "/index.html", "/resources", "/resources/tools", "/resources/screenshots", "/resources/files", "/debug"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", path, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), "<div id=\"app\">") {
+			t.Errorf("GET %s did not return the SPA shell", path)
+		}
+	}
+
+	// A missing hashed asset is a real 404 (it has an extension), not a shell.
+	resp, _ := doReq(t, http.MethodGet, ts.URL+"/assets/missing-abc123.js", "", nil, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /assets/missing-abc123.js = %d, want 404", resp.StatusCode)
+	}
+
+	// Traversal is refused even though the embed FS has no parent directory.
+	resp, _ = doReq(t, http.MethodGet, ts.URL+"/../internal/console/console.go", "", nil, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /../... = %d, want 404", resp.StatusCode)
+	}
+}
