@@ -68,18 +68,25 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD='…' runvm http
 # runvm: console on http://127.0.0.1:8765/ (login: admin)
 ```
 
-- **登录**：浏览器打开 `/`，用 `RUNVM_CONSOLE_USER` / `RUNVM_CONSOLE_PASSWORD` 登录；成功下发 `HttpOnly` + `SameSite` 会话 cookie，登出使其失效。
+- **登录**：浏览器打开 `/`，用 `RUNVM_CONSOLE_USER` / `RUNVM_CONSOLE_PASSWORD` 登录；成功下发 `HttpOnly` + `SameSite` 会话 cookie，登出使其失效。未登录访问任意路径（含深链）都渲染登录页，登录后回原路径（`?next=`）。
 - **改密码**：设 `RUNVM_CONSOLE_PASSWORD` 环境变量后重启即可；进程内不存任何可写的凭据文件。
 - **数据鉴权**：控制台的任何数据接口未登录一律 `401`；控制台登录与 MCP 的 Bearer token 相互独立，控制台不是绕过 MCP 鉴权的入口。
+- **构建**：前端是 Vite 产物，提交进 `internal/console/static/dist/` 并由 `go:embed` 内嵌；`make build` / Dockerfile 不依赖 Node，改了 `web/` 源码用 `make web` 重新构建并提交产物（CI 会做漂移检查）。
 
-四个页签：
+三段顶层导航，资源管理下四个二级页：
 
-| 页签 | 用法 |
-|---|---|
-| 状态 | 后端可用性、会话数、活跃会话列表，每 3 秒自动刷新 |
-| 资源 | 列出 runvm:// 资源并区分只读/可写；文本直接看，二进制预览/下载；可写文本在线编辑保存（保存后 `resources/read` 立即读到新内容） |
-| 上传 | 选本地文件上传进 `runvm://files/`，与 `runvm_upload` 同一套校验与大小上限 |
-| MCP 调试 | 见下 |
+| 页 | 路径 | 用法 |
+|---|---|---|
+| 系统总览 | `/` | 后端可用性、限额、活跃会话，每 3 秒自动刷新 |
+| 资源管理-检索 | `/resources` | 跨类型关键词检索（工具/截图/文件），结果分组，点击跳到子页 |
+| 资源管理-工具 | `/resources/tools` | 24 个工具 + input schema，可检索、看参数表与 schema |
+| 资源管理-截图 | `/resources/screenshots` | `runvm://screenshot/<session>` 的 PNG，列表 + 预览 + 下载 |
+| 资源管理-文件 | `/resources/files` | `runvm://files/` 的文件浏览器（目录树 + 列表 + 按格式打开） |
+| MCP 调试 | `/debug` | 见下 |
+
+文件浏览器按格式打开：图片（`png/jpg/jpeg/gif/webp/bmp/svg`）预览；`json` 树视图 + 编辑（保存前 `JSON.parse` 校验，非法 JSON 报错并阻止保存）；`md` 预览 + 编辑；`txt` 及文本类（`log/yaml/yml/toml/csv/ini/conf/go/js/css/html/sh`）直接编辑；其它二进制显示大小 / MIME / sha256 / 修改时间并下载。编辑保存走 `PUT /api/resources/file`，保存后 `resources/read` 立即读到新内容；上传并入文件页（拖拽或选择文件），与 `runvm_upload` 同一套校验与上限。只读资源（`runvm://tools`/`runvm://status`/截图/pdf）不给编辑入口。
+
+语言切换在顶栏右侧「中文 / EN」分段控件，切换不刷新整页并记住偏好；文案走 `web/locales/{zh-CN,en-US}.json`，构建期 inline，工具名/参数名/schema/URI/时间戳/后端原始错误不翻译。
 
 ### 调试页怎么用
 

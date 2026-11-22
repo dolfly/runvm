@@ -1,0 +1,70 @@
+/* ============================================================================
+ * runvm console design tokens (§12.1) — the single source of truth for every
+ * color, size, radius and font. Components must reference these variables and
+ * never write raw hex values or pixel sizes inline.
+ * ========================================================================== */
+:root {
+  /* color — chrome */
+  --c-canvas: #fdfcfc;
+  --c-surface-soft: #f8f7f7;
+  --c-surface-card: #f1eeee;
+  --c-ink: #201d1d;
+  --c-ink-deep: #0f0000;
+  --c-body: #424245;
+  --c-mute: #646262;
+  --c-subtle: #8a8787;
+  --c-disabled: #b3afae;
+  --c-hairline: rgba(15, 0, 0, 0.12);
+  --c-hairline-strong: #d5d0d0;
+
+  /* color — accent & semantic */
+  --c-accent: #0b57d0;
+  --c-accent-hover: #094ab3;
+  --c-accent-active: #073b8f;
+  --c-accent-soft: #e8eefb;
+  --c-accent-bright: #007aff;
+  --c-ok: #1f7a3d;
+  --c-warn: #8a5a00;
+  --c-danger: #b3261e;
+  --c-ok-soft: #e6f2e9;
+  --c-warn-soft: #fdf3e0;
+  --c-danger-soft: #fbeceb;
+
+  /* color — dark surfaces (read-only machine output) */
+  --c-dark: #201d1d;
+  --c-dark-elevated: #302c2c;
+  --c-dark-line: rgba(253, 252, 252, 0.12);
+  --c-on-dark: #fdfcfc;
+  --c-on-dark-mute: #9a9898;
+  --c-syn-string: #9ccc9c;
+  --c-syn-number: #ffb86b;
+  --c-ok-bright: #30d158;
+  --c-warn-bright: #ff9f0a;
+  --c-danger-bright: #ff3b30;
+  --c-scrim: rgba(32, 29, 29, 0.32);
+
+  /* type */
+  --font-ui: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+             "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+               "Cascadia Mono", "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace;
+
+  --fs-title: 20px;   --lh-title: 28px;
+  --fs-section: 14px; --lh-section: 20px;
+  --fs-body: 13px;    --lh-body: 20px;
+  --fs-prose: 14px;   --lh-prose: 22px;
+  --fs-meta: 12px;    --lh-meta: 18px;
+  --fs-micro: 11px;   --lh-micro: 16px;
+  --fs-mono: 12.5px;  --lh-mono: 20px;
+  --fs-mono-sm: 12px; --lh-mono-sm: 18px;
+
+  /* space */
+  --s-0: 0; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px;
+  --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px; --s-12: 48px;
+
+  /* radius */
+  --r-none: 0; --r-sm: 4px; --r-md: 6px; --r-full: 999px;
+
+  /* elevation — no shadows anywhere (§4.4) */
+  --shadow-none: none;
+}

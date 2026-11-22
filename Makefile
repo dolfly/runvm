@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build build-plain dist test vet fmt fmt-check doctor clean
+.PHONY: build build-plain dist test vet fmt fmt-check web doctor clean
 
 ## build: the real thing, with golem's unicorn engine compiled in
 build:
@@ -27,6 +27,12 @@ fmt-check:
 ## dist: cross-compiled archives for every supported platform
 dist:
 	./scripts/release.sh $(VERSION)
+
+## web: build the embedded console frontend (needs Node) and write its output
+## into internal/console/static/dist for go:embed. The CI web job runs this and
+## checks the committed dist matches the source (no drift).
+web:
+	cd web && npm ci && npm run check:locales && npm run build
 
 ## doctor: probe this machine by actually starting both backends.
 ## Deliberately built WITHOUT -trimpath: golem locates its bionic sysroot through

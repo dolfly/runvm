@@ -170,7 +170,7 @@ MIT 驱动，负责把扩展消息路由桩掉并暴露 `window.__webbrainRun`�
 | `POST /api/login` | 登录，下发 `HttpOnly` + `SameSite` 会话 cookie |
 | `POST /api/logout` | 登出，使会话失效 |
 | `GET /api/status` | 实时运行状态（与 `runvm_status` 同源） |
-| `GET /api/resources` | 列出资源（带 `writable` 标记） |
+| `GET /api/resources` | 列出资源（带 `writable` 标记；`runvm://files/*` 项另带 `sha256` 与 `mod_time`） |
 | `GET /api/resources/read?uri=…` | 读资源内容（文本 `text`，二进制 `blob`） |
 | `PUT /api/resources/file` | 保存可写文本资源（复用 `Store.Write`） |
 | `POST /api/upload` | 上传文件（复用 `Store.Upload`，同一套校验与上限） |

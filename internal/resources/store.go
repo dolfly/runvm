@@ -277,7 +277,7 @@ func (s *Store) List() ([]Meta, error) {
 		if err != nil {
 			return err
 		}
-		head, err := headOf(path)
+		sum, head, err := hashHead(path)
 		if err != nil {
 			return err
 		}
@@ -285,6 +285,7 @@ func (s *Store) List() ([]Meta, error) {
 			URI:      "runvm://files/" + filepath.ToSlash(rel),
 			Name:     filepath.ToSlash(rel),
 			Size:     fi.Size(),
+			Sha256:   hex.EncodeToString(sum),
 			ModTime:  fi.ModTime().UTC(),
 			MimeType: detectMime(rel, head),
 		})
@@ -375,20 +376,31 @@ func (s *Store) meta(name string, size int64, sum []byte, mimeType string) (Meta
 	}, nil
 }
 
-// headOf reads up to 512 bytes of a file, enough for content sniffing without
-// paying for the whole file on every listing.
-func headOf(path string) ([]byte, error) {
+// hashHead streams a file once, returning its SHA-256 and the first 512 bytes
+// (for content sniffing). The hash streams in constant memory; only the small
+// head is retained. Listing now hashes every file so the console can show the
+// sha256 the file info view requires without a second read.
+func hashHead(path string) ([]byte, []byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
-	buf := make([]byte, 512)
-	n, err := io.ReadFull(f, buf)
+	h := sha256.New()
+	head := make([]byte, 512)
+	n, err := io.ReadFull(f, head)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil, err
+		return nil, nil, err
 	}
-	return buf[:n], nil
+	if n > 0 {
+		if _, err := h.Write(head[:n]); err != nil {
+			return nil, nil, err
+		}
+	}
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, nil, err
+	}
+	return h.Sum(nil), head[:n], nil
 }
 
 // detectMime sniffs a content type from the first bytes, falling back to the
