@@ -31,6 +31,7 @@ import (
 	"github.com/dolfly/runvm/internal/doctor"
 	"github.com/dolfly/runvm/internal/h5"
 	"github.com/dolfly/runvm/internal/mcp"
+	"github.com/dolfly/runvm/internal/persist"
 	"github.com/dolfly/runvm/internal/resources"
 	"github.com/dolfly/runvm/internal/tools"
 )
@@ -92,6 +93,7 @@ func serve() {
 		os.Exit(1)
 	}
 	set.Resources = res
+	openPersistence(set)
 	set.StartReaper(ctx)
 	// Sessions hold emulators and child processes; a clean shutdown must not
 	// leave either behind.
@@ -135,6 +137,7 @@ func serveHTTP(args []string) {
 		os.Exit(2)
 	}
 	set.Resources = res
+	openPersistence(set)
 	set.StartReaper(ctx)
 	defer set.CloseAll()
 
@@ -241,6 +244,23 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// openPersistence attaches the on-disk state (session ledger + browser
+// profiles) to the set. A failure is not fatal — the server still serves, and
+// runvm_status reports why persistence is off — because a read-only data
+// directory must not stop the MCP endpoint from working.
+func openPersistence(set *tools.Set) {
+	store, err := persist.FromEnv()
+	set.Persist, set.PersistErr = store, err
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "runvm: persistence disabled:", err)
+		return
+	}
+	// Move the id counters past the recorded ids, so a session opened after a
+	// restart cannot collide with one the ledger still names. Nothing is
+	// reopened: runvm_status shows what could come back.
+	set.Restore()
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `runvm — test environments as MCP tools
 
@@ -263,6 +283,8 @@ environment:
   RUNVM_ENGINE   default CPU backend, e.g. unicorn
   RUNVM_RESOURCES_DIR   writable resource root (default ./runvm-resources)
   RUNVM_RESOURCES_MAX_SIZE  per-file upload/write cap, e.g. 64MiB (default 64MiB)
+  RUNVM_DATA_DIR   session ledger + browser profiles (default /work/runvm, else <config>/runvm)
+  RUNVM_H5_PERSIST turn on a default browser profile for ephemeral:false opens (default off)
 
 The server speaks JSON-RPC 2.0 over stdio. Point an MCP client at the binary:
 

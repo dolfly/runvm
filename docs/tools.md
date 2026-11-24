@@ -13,12 +13,14 @@ layout: page
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 后端可用性、限制、活跃会话；h5 会话逐条给 `target`/`last_used`/存活状态，`reclaimed` 记录被自动回收的会话。不启动任何东西 |
+| `runvm_status` | 后端可用性、限制、活跃会话；h5 会话逐条给 `target`/`last_used`/存活状态，`reclaimed` 记录被自动回收的会话，`persistence` 报运行态台账（哪些记录已恢复、哪些已失效及原因）。不启动任何东西 |
 | `runvm_upload` | 把本机文件上传进可写资源空间（`runvm://files/`），返回 URI / 字节数 / sha256 |
 | `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源，返回 URI / 字节数 / sha256 |
 | `runvm_close_all` | 一次关闭指定后端（`android`/`ios`/`h5`）或全部会话，批量释放 `RUNVM_MAX_SESSIONS` 配额 |
 
-`runvm_status` 的 `sessions.h5` 是逐会话明细（`session`、`target`、`last_used`、`state`——`alive`/`dead`）；`sessions.android` 保持原有的明细，`sessions.ios` 仍是 ID 列表，两个键都不变。顶层 `reclaimed` 是服务端自动关闭的会话历史（`session`、`backend`、`reason`、`at`），`reason` 取值：`idle`（空闲回收）、`dead`（页面宿主进程已退出）、`close_all`（`runvm_close_all`）。
+`runvm_status` 的 `sessions.h5` 是逐会话明细（`session`、`target`、`last_used`、`state`——`alive`/`dead`，以及 `profile`/`ephemeral`）；`sessions.android` 保持原有的明细，`sessions.ios` 仍是 ID 列表，两个键都不变。顶层 `reclaimed` 是服务端自动关闭的会话历史（`session`、`backend`、`reason`、`at`），`reason` 取值：`idle`（空闲回收）、`dead`（页面宿主进程已退出）、`close_all`（`runvm_close_all`）。
+
+顶层 `persistence` 是**落盘状态**（见下节）：`enabled`、`data_dir`、`profiles_dir`、`ledger`（`ok` 或 `ledger_error`），以及 `sessions`——每条带 `state`：`restored`（进程重启后又活过来了，id 不变、可直接寻址）或 `stale`（只剩记录，附 `reason` 和 `reopen` 参数）。`stale` 永远不等于 `restored`：前者没有任何句柄可用。
 
 **可写资源与失败语义**：`runvm_upload` 的参数是 `path`（本机文件路径，必填）+ `target`（可选相对路径/名字，默认取源文件 base name）；`runvm_write` 的参数是 `target`（必填）+ `content`（文本）或 `base64`（二进制），两者二选一。两者都返回 `{"uri", "bytes", "sha256", "name"}`，不是一句 "ok"。
 
@@ -77,7 +79,7 @@ layout: page
 
 | 工具 | 关键参数 | 作用 |
 |---|---|---|
-| `h5_open` | `target`、`env`、`ephemeral`、`visible`、`webbrain`、`width`/`height` | 打开页面，返回会话 |
+| `h5_open` | `target`、`env`、`ephemeral`、`profile`、`visible`、`webbrain`、`width`/`height` | 打开页面，返回会话 |
 | `h5_eval` | `session`、`js`、`timeout_ms` | 执行 JS，Promise 会被 await |
 | `h5_wait_for` | `session`、`expression` 或 `selector`、`timeout_ms` | 轮询到条件成立 |
 | `h5_console` | `session`、`clear` | 取回 console 与页面异常 |
@@ -87,6 +89,17 @@ layout: page
 | `webbrain` | `session`、`action`、`ref_id`、`text`、… | 用 WebBrain 的页面控制脚本驱动页面（见下） |
 
 `h5_open` 的 `env` 会以 `webframe.env` 暴露给页面；`ephemeral` 默认 `true`，cookie/存储/缓存只留内存。
+
+### 运行态持久化（会话台账 + 浏览器 profile）
+
+数据目录由 `RUNVM_DATA_DIR` 指定（默认 `/work/runvm`，容器外是 `<用户配置目录>/runvm`），0700；台账 `sessions.json` 0600，每个 profile 在 `profiles/<名字>/` 下，0700。
+
+- **台账跟随活跃会话**：每次开/关会话都会重写 `sessions.json`（临时文件 + rename，读到的永远是完整文件）。它记 `id`/`backend`/`target`/`profile`/`created_at`/`last_used_at`，h5 条目还带 `reopen`（重开需要的参数）。台账损坏不会让服务起不来：坏文件被改名成 `sessions.json.bad-<ts>` 保留，`runvm_status` 的 `ledger_error` 如实报错；版本比本构建新的台账只读不覆盖。
+- **profile 才有登录态**：`h5_open {"target": …, "ephemeral": false, "profile": "shop"}` 把 cookie / localStorage / 缓存落到 `profiles/shop/`，重启后按同名 profile 打开还是登录状态。`ephemeral: true` 永远赢：同时传 `profile` 时 profile 被丢弃，结果里给 `profile_ignored: "ephemeral"`，不假装持久化。
+- **默认不翻**：不传 `profile` 时即使 `ephemeral: false` 也只是内存态，除非服务端设了 `RUNVM_H5_PERSIST`（`1`/`true` 用 `default`，或直接给名字）。默认值翻转是部署决定，不是代码偷偷改的。
+- **重启不自动重开**：启动只把 id 计数器推过台账里已用的号（避免 `h5-1` 撞车），不启动任何浏览器；`runvm_status` 的 `persistence.sessions` 会说明哪些记录已经 `restored`、哪些 `stale` 以及为什么。
+- **平台差异（不替引擎吹牛）**：Linux 用 `XDG_DATA_HOME`/`XDG_CACHE_HOME` 重定向（WebKitGTK 实测重启后 cookie 还在）；Windows 用 `APPDATA`（WebView2 的用户数据目录）；macOS 的 WKWebView 没有选目录的 API，只能改 `HOME`——**未在真机验证**，且会连带移动进程读写的其它 home 路径。
+- **边界**：台账是记录不是句柄。干净关闭的会话记录会消失（profile 目录留在盘上，按名字重开得到新 id）；android/ios 的模拟器状态从不落盘，台账里只留记录，`stale` 原因写的就是这句话。
 
 页面宿主进程自己退出（页面 `exit()`、崩溃、被杀）时，会话会被自动从注册表移除并释放配额，不需要手动 `h5_close`；这类回收会记进 `runvm_status` 的 `reclaimed`（`reason: "dead"`）。
 

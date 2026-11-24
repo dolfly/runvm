@@ -22,6 +22,7 @@ import (
 	"github.com/dolfly/runvm/internal/h5"
 	"github.com/dolfly/runvm/internal/ios"
 	"github.com/dolfly/runvm/internal/mcp"
+	"github.com/dolfly/runvm/internal/persist"
 	"github.com/dolfly/runvm/internal/resources"
 	"github.com/dolfly/runvm/internal/session"
 )
@@ -50,6 +51,18 @@ type Set struct {
 	// upload/write tools answer with a clear error instead of pretending to
 	// succeed.
 	Resources *resources.Store
+
+	// Persist is the state that outlives the process: the session ledger and the
+	// browser profiles. Nil means persistence is unavailable (no data directory),
+	// and runvm_status says why instead of the tools pretending otherwise.
+	Persist *persist.Store
+	// PersistErr is why Persist is nil, when it is.
+	PersistErr error
+
+	// persistMu serializes ledger snapshots: the ledger is a full snapshot, so
+	// the last write has to be the newest state.
+	persistMu  sync.Mutex
+	persistErr error
 }
 
 // Reclaimed records one session the server closed on its own — idle reaping,
@@ -71,6 +84,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		IOS:     session.New[*ios.Session]("ios"),
 		H5:      session.New[*h5.Session]("h5"),
 	}
+	// The stores call back after every add and remove; the ledger follows the
+	// live set without either side knowing about the other's internals.
+	s.wirePersistence()
 	srv := mcp.NewServer("runvm", version)
 
 	srv.Add(mcp.Tool{
@@ -78,7 +94,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 		Description: "Report which backends are live, how many sessions are open, and enough per-session detail " +
 			"(target, last_used, alive/dead state) to decide which session to close when the quota is full. " +
 			"The \"reclaimed\" list records sessions the server closed on its own — idle reaping, a page host " +
-			"that died, or runvm_close_all — with the reason and time. Cheap: does not boot anything.",
+			"that died, or runvm_close_all — with the reason and time. The \"persistence\" section reports the " +
+			"on-disk state: which recorded sessions are restored (live again under the same id) and which are " +
+			"stale, with the reason and the arguments that would bring one back. Cheap: does not boot anything.",
 		InputSchema: object(nil),
 		Handler:     s.status,
 	})
@@ -279,12 +297,16 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 	srv.Add(mcp.Tool{
 		Name: "h5_open",
 		Description: "Open a page in a real WebKit view (headless, unthrottled) and return a session id. " +
-			"The target may be a URL, a local file path, or about:blank. Uses webframe underneath.",
+			"The target may be a URL, a local file path, or about:blank. Uses webframe underneath. " +
+			"Pass a profile (and ephemeral:false) to keep cookies and local storage in " +
+			"<data dir>/profiles/<profile>, so a later process opens the same target still logged in; " +
+			"reopening that profile after a restart reuses the recorded session id and reports restored.",
 		InputSchema: object(map[string]any{
 			"target": str(`URL, file path, or "about:blank"`),
 			"env": objectFields(map[string]any{"type": "string"},
 				"Strings exposed to the page as webframe.env (before any page script)"),
-			"ephemeral": boolean("Keep cookies, storage and cache in memory only (default true)"),
+			"ephemeral": boolean("Keep cookies, storage and cache in memory only (default true; it wins over profile)"),
+			"profile":   str("Name of a persistent browser profile (cookies/local storage under <data dir>/profiles/<name>). Requires ephemeral:false; ignored, and reported as profile_ignored, when ephemeral is true"),
 			"visible":   boolean("Draw the page in a window instead of offscreen; required for h5_screenshot on Linux/Windows"),
 			"webbrain":  boolean("Inject WebBrain's page-control scripts (accessibility tree + DOM actions) after load, so the webbrain tool can drive the page"),
 			"width":     num("View width in points (default 1280 when visible). Also the page width of an h5_pdf print, so a hidden 1280x720 view prints a 16:9 document"),
@@ -755,6 +777,8 @@ func (s *Set) h5Details() []map[string]any {
 			"target":    sess.Target(),
 			"last_used": sess.LastUsed().UTC().Format(time.RFC3339),
 			"state":     state,
+			"profile":   sess.Profile(),
+			"ephemeral": sess.Ephemeral(),
 		})
 	}
 	return out
@@ -939,7 +963,8 @@ func (s *Set) status(context.Context, json.RawMessage) (any, error) {
 			"ios":     s.IOS.IDs(),
 			"h5":      s.h5Details(),
 		},
-		"reclaimed": s.reclaimedSnapshot(),
+		"reclaimed":   s.reclaimedSnapshot(),
+		"persistence": s.persistenceStatus(),
 	}, nil
 }
 
@@ -1496,6 +1521,7 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 		Target    string            `json:"target"`
 		Env       map[string]string `json:"env"`
 		Ephemeral *bool             `json:"ephemeral"`
+		Profile   string            `json:"profile"`
 		Visible   *bool             `json:"visible"`
 		Webbrain  *bool             `json:"webbrain"`
 		Width     int               `json:"width"`
@@ -1511,12 +1537,39 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 	if a.Ephemeral != nil {
 		ephemeral = *a.Ephemeral
 	}
+	profile := strings.TrimSpace(a.Profile)
+	profileIgnored := false
+	if profile != "" && ephemeral {
+		// The caller named a profile and also asked for an in-memory page. The
+		// explicit ephemeral wins — a profile must never be written behind the
+		// caller's back — and the result says the name was dropped instead of
+		// pretending the page is persistent.
+		profile, profileIgnored = "", true
+	}
+	if profile == "" && !ephemeral {
+		profile = s.defaultProfile()
+	}
+	if profile != "" && s.Persist == nil {
+		return nil, fmt.Errorf("h5_open: profile %q needs persistent storage, which is unavailable: %s", profile, s.persistReason())
+	}
+	if profile != "" {
+		// Validate before booting a browser: a bad name must not cost a process.
+		if _, err := persist.ProfileDir(s.Persist.Dir(), profile); err != nil {
+			return nil, fmt.Errorf("h5_open: %w", err)
+		}
+	}
+	resume := ""
+	if profile != "" {
+		resume = s.Persist.ResumeID(profile)
+	}
 	sess, err := h5.Open(a.Target, h5.OpenOptions{
 		Env:       a.Env,
 		Ephemeral: ephemeral,
 		Visible:   a.Visible != nil && *a.Visible,
 		Width:     a.Width,
 		Height:    a.Height,
+		Profile:   profile,
+		DataDir:   s.persistDataDir(),
 		OnProgress: func(p float64, msg string) {
 			mcp.Notify(ctx, p, "h5_open: "+msg)
 		},
@@ -1524,7 +1577,16 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	id := s.H5.Add(sess)
+	// Reusing the recorded id lets a model that still holds "h5-2" keep using
+	// it after a restart. If the id is somehow live already, AddID refuses and
+	// the session gets a fresh one instead of overwriting a running page.
+	id := ""
+	if resume != "" && s.H5.AddID(resume, sess) {
+		id = resume
+	}
+	if id == "" {
+		id = s.H5.Add(sess)
+	}
 	s.watchH5(id, sess)
 	if a.Webbrain != nil && *a.Webbrain {
 		mcp.Notify(ctx, 0.8, "h5_open: injecting webbrain page scripts")
@@ -1535,7 +1597,30 @@ func (s *Set) h5Open(ctx context.Context, raw json.RawMessage) (any, error) {
 		}
 		mcp.Notify(ctx, 0.95, "h5_open: webbrain ready")
 	}
-	return map[string]any{"session": id, "target": sess.Target(), "webbrain": a.Webbrain != nil && *a.Webbrain}, nil
+	out := map[string]any{
+		"session":   id,
+		"target":    sess.Target(),
+		"webbrain":  a.Webbrain != nil && *a.Webbrain,
+		"ephemeral": ephemeral,
+		"profile":   profile,
+		"restored":  resume != "" && id == resume,
+	}
+	if profileIgnored {
+		out["profile_ignored"] = "ephemeral" // the profile name was dropped on purpose
+	}
+	if profile != "" {
+		out["data_dir"] = s.persistDataDir()
+	}
+	return out, nil
+}
+
+// persistDataDir is the data directory the page host writes its profile to, or
+// "" when persistence is off (the caller has already rejected a profile then).
+func (s *Set) persistDataDir() string {
+	if s.Persist == nil {
+		return ""
+	}
+	return s.Persist.Dir()
 }
 
 func (s *Set) h5Eval(ctx context.Context, raw json.RawMessage) (any, error) {

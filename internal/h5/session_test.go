@@ -173,3 +173,38 @@ func TestRequestTouchesLastUsed(t *testing.T) {
 		t.Error("request must touch last_used")
 	}
 }
+
+func TestProfileNameFollowsEphemeral(t *testing.T) {
+	// The flag and the profile must never disagree: an ephemeral page has
+	// nothing on disk, so it must not claim a profile, and a persistent page
+	// must not be reported as in-memory.
+	cases := []struct {
+		name      string
+		opts      OpenOptions
+		ephemeral bool
+		want      string
+	}{
+		{"default is ephemeral", OpenOptions{}, true, ""},
+		{"profile dropped when ephemeral", OpenOptions{Profile: "shop"}, true, ""},
+		{"profile kept when persistent", OpenOptions{Profile: "shop"}, false, "shop"},
+		{"persistent without a profile", OpenOptions{}, false, ""},
+	}
+	for _, tc := range cases {
+		if got := profileName(tc.opts, tc.ephemeral); got != tc.want {
+			t.Errorf("%s: profileName = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDetachedSessionReportsNoProfile(t *testing.T) {
+	s := NewDetached("https://example.com", true)
+	if s.Ephemeral() {
+		t.Error("a detached session is not an ephemeral browser page")
+	}
+	if s.Profile() != "" {
+		t.Errorf("Profile = %q, want empty", s.Profile())
+	}
+	if s.CreatedAt().IsZero() {
+		t.Error("CreatedAt must be set")
+	}
+}

@@ -20,10 +20,12 @@ layout: page
 | HTTP 控制台（Vite 构建链 + 三段导航 + 资源管理（检索/工具/截图/文件浏览器）+ 登录鉴权 + 中英文 i18n + 只读 MCP 调试页（对齐 Inspector：连接信息/图片结果/资源点选）） | ✅ | ✅ | ✅ |
 | CI 验证 | 完整 e2e（39 项） | doctor + selftest | doctor + selftest |
 | 会话回收（死会话出栈 + 空闲回收 + 批量释放 + 状态可见） | ✅ | ✅ | ✅ |
+| 运行态台账（`sessions.json` 落盘 + 重启后 `restored`/`stale` 区分 + 损坏/版本不覆盖） | ✅ | ✅ | ✅ |
+| 浏览器 profile 持久化（cookie/localStorage 落盘，重启后同 id 恢复） | ✅ 实测 | ✅ 代码路径，未真机验证 | ⚠️ 只能改 `HOME`，未验证 |
 
 ## 还没做
 
-**运行态持久化**。会话回收（死会话出栈、空闲回收、`runvm_close_all` 批量释放、`runvm_status` 逐会话明细）已在三平台落地；但会话身份与浏览器 profile 不落盘，进程重启后无法恢复登录态——这是下一阶段的事（会话台账落盘 + 浏览器 profile 持久化 + 重启恢复）。
+**运行态持久化的剩余缺口**。台账与 profile 已落地（见上）；剩下的是平台与语义边界：macOS 只能改 `HOME`（WKWebView 无目录 API，未验证），Windows 的 profile 未真机验证；台账不保存 android/ios 模拟器状态，干净关闭的会话记录会消失（profile 目录留在盘上）；profile 目录没有 GC，删数据目录是唯一的回收方式。
 
 **矢量 PDF 的另外两个平台**。macOS 已经打通：`WKWebView.createPDFWithConfiguration:` 由 `dolfly/glaze` v0.4.0 的 `PrintPDF()` 承载，`dolfly/webframe-fork` v0.3.0 透出 `Frame.PrintPDF()`，`h5_pdf` 先打印、打印不了才回落到栅格，结果里的 `vector` 字段说明是哪一种。剩下 Windows 的 `ICoreWebView2_16.PrintToPdfAsync`（COM，走 purego）和 Linux 的 `webkit_print_operation`（GTK 打印设置指向文件）。
 

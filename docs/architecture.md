@@ -15,6 +15,7 @@ runvm（MCP 服务，进程常驻）
    ├── internal/mcp       传输、进度、取消、资源、提示词（零依赖）
    ├── internal/tools     24 个工具的参数校验与编排
    ├── internal/session   会话注册表（泛型 + last_used）
+   ├── internal/persist   会话台账 + 浏览器 profile（RUNVM_DATA_DIR）
    ├── internal/resources 可写资源存储（runvm://files/ 背后的磁盘根）
    ├── internal/android   golem 会话池 + ELF 导出表 + JNI 桩
    ├── internal/ios       golem 会话池 + Mach-O 符号表 / bind 流解析（无 JNI）
@@ -36,6 +37,16 @@ runvm web-host（子进程，主 goroutine = WebView 事件循环）
 ```
 
 好处：页面崩了不带倒服务器；坏处：一个页面 = 一个进程 + 一次冷启动（0.5–1.5 秒）。
+
+## 会话生命周期
+
+会话注册表是泛型的（`session.Store[T]`），三个后端共用同一套 id 分配、上限、空闲回收和 add/remove 钩子：
+
+- **id**：`h5-N` / `android-N` / `ios-N`，进程内自增；启动时 `Restore()` 把计数器推过台账里已记录的最大号，避免重启后撞号。
+- **上限**：`RUNVM_MAX_SESSIONS`（默认 8）是所有后端活跃会话的总数，超了报 `too many sessions`。
+- **空闲回收**：后台 reaper 按 `last_used` 扫，`RUNVM_IDLE_TIMEOUT`（默认 30m）到点就关；h5 还会即时发现宿主进程退出并出栈。两者都记进 `reclaimed`，`runvm_status` 能看到“为什么这个会话不见了”。
+- **落盘**：钩子把活跃集同步进 `RUNVM_DATA_DIR/sessions.json`（0600，临时文件 + rename）。台账是**记录不是句柄**：进程被 `kill -9` 后重启，`persistence.sessions` 把记录分成 `restored`（同 id 已重新活过来）和 `stale`（只剩记录，附 `reason` 与 `reopen` 参数），从不把 `stale` 当成 `restored`。
+- **浏览器 profile**：`h5_open {"ephemeral": false, "profile": "name"}` 把 cookie/localStorage 落到 `profiles/name/`（0700），平台重定向见 `internal/persist/profile.go`（Linux `XDG_DATA_HOME`、Windows `APPDATA`、macOS `HOME`）。`ephemeral: true` 永远优先，profile 会被丢弃并在结果里报 `profile_ignored`。
 
 ## 并发模型
 
