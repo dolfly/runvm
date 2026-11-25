@@ -31,6 +31,8 @@ layout: page
 | `RUNVM_CONSOLE_PASSWORD` | 空 | 控制台登录密码；未设置时启动生成随机密码打到 stderr，无内置默认密码 |
 | `RUNVM_RESOURCES_DIR` | 工作目录下 `runvm-resources` | 可写资源根目录（0700，不存在自动建） |
 | `RUNVM_RESOURCES_MAX_SIZE` | `64MiB` | 单个上传/写入上限 |
+| `RUNVM_DATA_DIR` | `/work/runvm`，容器外 `<用户配置目录>/runvm` | 会话台账 + 浏览器 profile 根目录（0700，不存在自动建） |
+| `RUNVM_H5_PERSIST` | 空（关） | `ephemeral:false` 且未给 `profile` 时的默认 profile：`1`/`true` 用 `default`，也可直接写名字 |
 
 ## 会话治理
 
@@ -47,6 +49,22 @@ RUNVM_MAX_SESSIONS=8 RUNVM_IDLE_TIMEOUT=30m runvm
 - 被自动回收的会话会留在 `runvm_status` 的 `reclaimed` 历史里（哪几个、为什么、什么时候），模型不会再看到一句没头没尾的 `unknown session`。
 
 > 注意 `last_used` 只在调用时更新。如果你打算开着一个会话十分钟不做任何调用再截图，把 `RUNVM_IDLE_TIMEOUT` 设大或关掉。
+
+## 运行态持久化
+
+会话身份和浏览器登录态落在 `RUNVM_DATA_DIR`（默认 `/work/runvm`）：
+
+```bash
+RUNVM_DATA_DIR=/data/runvm runvm http -addr 127.0.0.1:8765
+```
+
+- **目录**：数据目录 0700，`sessions.json` 0600，`profiles/<名字>/` 0700。profile 里是活的登录态，权限不是装饰。
+- **台账**：`sessions.json` 跟随活跃会话，每次开/关重写（临时文件 + rename）。损坏时坏文件改名 `sessions.json.bad-<ts>` 保留，服务照常起，`runvm_status.persistence.ledger_error` 说明；比本构建新的版本只读不覆盖。
+- **恢复**：`h5_open {"target": …, "ephemeral": false, "profile": "shop"}` 落 profile；重启后同名 profile 打开会复用台账里的 id（`restored: true`），cookie/localStorage 还在。启动**不自动重开**任何页面，只把 id 计数器推过已用号。
+- **看状态**：`runvm_status.persistence.sessions` 每条是 `restored`（已恢复、可寻址）或 `stale`（只剩记录，带 `reason` 与 `reopen` 参数）。`stale` 不假装是 `restored`。
+- **默认不持久化**：不传 `profile` 时即使 `ephemeral:false` 也只是内存态；要默认开就设 `RUNVM_H5_PERSIST=1`（部署决定）。
+- **平台**：Linux 走 `XDG_DATA_HOME`（实测重启后 cookie 在）；Windows 走 `APPDATA`；macOS 的 WKWebView 没有目录 API，只能改 `HOME`，**未在真机验证**。
+- **不落盘的东西**：android/ios 的模拟器状态（进程内），台账里只留记录；干净关闭的会话记录会消失，profile 目录留在盘上。
 
 ## 远程访问的安全边界
 
@@ -112,13 +130,21 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD='…' runvm http
                  "engines": {"in_use": 0, "idle": 2, "created": 2}}],
     "ios": ["ios-1"],
     "h5": [{"session": "h5-1", "target": "https://example.com",
-            "last_used": "2026-11-22T05:00:00Z", "state": "alive"}]
+            "last_used": "2026-11-22T05:00:00Z", "state": "alive",
+            "profile": "shop", "ephemeral": false}]
   },
-  "reclaimed": [{"session": "h5-2", "backend": "h5", "reason": "dead", "at": "2026-11-22T04:59:00Z"}]
+  "reclaimed": [{"session": "h5-2", "backend": "h5", "reason": "dead", "at": "2026-11-22T04:59:00Z"}],
+  "persistence": {
+    "enabled": true, "data_dir": "/data/runvm", "profiles_dir": "/data/runvm/profiles",
+    "ledger": "ok",
+    "sessions": [{"session": "h5-1", "backend": "h5", "state": "stale",
+                  "profile": "shop", "reason": "page host exited; call h5_open …",
+                  "reopen": {"target": "https://example.com", "profile": "shop"}}]
+  }
 }
 ```
 
-`engines.created` 超过池大小，说明引擎在回收或重建——长跑时这是"为什么变慢了"的第一手线索。`reclaimed` 说明哪些会话被服务端自动关掉、为什么、什么时候。
+`engines.created` 超过池大小，说明引擎在回收或重建——长跑时这是"为什么变慢了"的第一手线索。`reclaimed` 说明哪些会话被服务端自动关掉、为什么、什么时候。`persistence.sessions` 的 `stale` 条目只存在于台账里：没有句柄可用，`reopen` 是把它拿回来的参数。
 
 ## 容器
 
@@ -138,4 +164,5 @@ docker run --rm -p 127.0.0.1:8765:8765 \
 | `WebKitGTK not found` | 缺 `libwebkit2gtk-4.1-0` |
 | `cannot load libunicorn` | 缺 `libunicorn2`，或 `GOLEM_UNICORN` 指错 |
 | `bionic sysroot not found` | `RUNVM_ASSETS` 没指到 golem 的 `assets` |
+| 重启后登录态没了 | `h5_open` 没传 `profile`（或 `ephemeral` 还是默认的 `true`）；看 `runvm_status.persistence` 的 `stale` 原因 |
 | 截图是白的 | 没开 `visible: true`；或窗口还没画完（`selftest` 会抓到） |

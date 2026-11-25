@@ -136,7 +136,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 
 | 工具 | 作用 |
 |---|---|
-| `runvm_status` | 各后端是否可用、有几个会话、逐会话 `target`/`last_used`/存活状态,以及 `reclaimed` 自动回收历史(**不启动任何东西**) |
+| `runvm_status` | 各后端是否可用、有几个会话、逐会话 `target`/`last_used`/存活状态,以及 `reclaimed` 自动回收历史和 `persistence` 落盘台账(**不启动任何东西**) |
 | `runvm_upload` | 把本机文件上传进可写资源空间 `runvm://files/<路径>`,返回 URI / 字节数 / sha256 |
 | `runvm_write` | 把文本或 base64 二进制内容写/覆盖到一个可写资源 |
 | `runvm_close_all` | 一次关闭指定后端或全部会话,批量释放 `RUNVM_MAX_SESSIONS` 配额 |
@@ -152,7 +152,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 | `ios_imports` | 列出 dylib 需要的外部符号与依赖库——这些没有实现 |
 | `ios_call` | 调一个导出函数,返回 `value`/`hex`/`i32` |
 | `ios_close` | 释放 ios 会话 |
-| `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank` |
+| `h5_open` | 在 WebKit 里打开 URL / 本地文件 / `about:blank`;传 `profile` + `ephemeral:false` 可把 cookie/localStorage 落到数据目录,重启后按同名 profile 重开仍是登录态 |
 | `h5_eval` | 在页面里执行 JS,返回结果(自动 await Promise) |
 | `h5_wait_for` | 轮询直到表达式为真或选择器命中,返回当时的取值 |
 | `h5_console` | 取回缓冲的 console 与页面异常 |
@@ -201,11 +201,15 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 |---|---|---|
 | `RUNVM_MAX_SESSIONS` | 8 | android + ios + h5 会话总数上限,超了报错并点名该关哪个 |
 | `RUNVM_IDLE_TIMEOUT` | `30m` | 超过这么久没被使用的会话自动关闭,如 `30m`;`0` 表示关闭 |
+| `RUNVM_DATA_DIR` | `/work/runvm`(容器外 `<用户配置目录>/runvm`) | 会话台账 + 浏览器 profile 根目录(0700,不存在自动建) |
+| `RUNVM_H5_PERSIST` | 空(关) | `ephemeral:false` 且未给 `profile` 时的默认 profile 名(`1` 表示 `default`) |
 
 - `runvm_status` 逐会话报 h5 的 `target` / `last_used` / 存活状态(`alive`/`dead`),android 仍是明细、ios 仍是 ID 列表;`reclaimed` 记录被服务端自动关掉的会话(哪几个、为什么、什么时候)。
 - **h5 页面宿主进程死了会自己出栈**:页面 `exit()`、崩溃或被杀时,会话自动移除并释放配额,不需要手动 `h5_close`。android / ios 是进程内模拟器,没有独立宿主进程,不适用死会话出栈。
 - **所有使用会话的入口都更新 `last_used`**(`h5_console` / `h5_screenshot` / `h5_pdf` / `webbrain`,以及 android / ios 读路径),正在用的会话不会被空闲回收误杀。
 - **批量释放**用 `runvm_close_all`(可只关 `android` / `ios` / `h5`,不传则全关)。
+
+**运行态持久化**:`RUNVM_DATA_DIR` 下的 `sessions.json`(0600)跟随活跃会话,每次开/关重写(临时文件 + rename);损坏时坏文件改名 `.bad-<ts>` 保留并在 `runvm_status.persistence.ledger_error` 报出,服务照常起。`h5_open` 传 `profile` + `ephemeral:false` 时,cookie/localStorage 落在 `profiles/<名字>/`(0700);重启后同名 profile 重开会复用台账里的 id(`restored: true`),不传 profile 则连 `ephemeral:false` 也只是内存态(要默认开设 `RUNVM_H5_PERSIST`)。启动不自动重开页面,`persistence.sessions` 里 `restored`(已恢复可寻址)与 `stale`(只剩记录,带 `reason`/`reopen`)分开报。Linux 走 `XDG_DATA_HOME`(实测重启后 cookie 在),Windows 走 `APPDATA`,macOS 的 WKWebView 只能改 `HOME`(**未在真机验证**);android/ios 模拟器状态从不落盘。
 
 异步 UI 用 `h5_wait_for` 而不是 `sleep`:
 
@@ -283,6 +287,8 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/ru
 | `GOLEM_UNICORN` | 显式指定 `libunicorn` 路径(golem 读取) |
 | `RUNVM_RESOURCES_DIR` | 可写资源根目录(默认工作目录下 `runvm-resources`,不存在自动建,0700) |
 | `RUNVM_RESOURCES_MAX_SIZE` | 单个上传/写入上限,如 `64MiB`(默认 64MiB) |
+| `RUNVM_DATA_DIR` | 会话台账 + 浏览器 profile 根目录(默认 `/work/runvm`,容器外 `<用户配置目录>/runvm`,0700) |
+| `RUNVM_H5_PERSIST` | `ephemeral:false` 且未给 `profile` 时的默认 profile(`1`/`true` 用 `default`,也可写名字;默认关) |
 | `RUNVM_CONSOLE_USER` | 控制台登录用户名(默认 `admin`) |
 | `RUNVM_CONSOLE_PASSWORD` | 控制台登录密码;未设置时启动生成随机密码打到 stderr,**无内置默认密码** |
 
@@ -290,7 +296,7 @@ RUNVM_CONSOLE_USER=admin RUNVM_CONSOLE_PASSWORD=$(openssl rand -hex 16) ./bin/ru
 
 - **不是安全沙箱**。加载的 `.so` 在你的进程里被模拟执行,页面在真实 WebKit 里运行。只跑你信任的代码。
 - **一个页面一个进程**,`h5_open` 的成本约 0.5–1.5 秒;批量测试请复用会话。不同页面之间并行,同一个页面内的 `h5_eval` 串行(保证语句顺序)。
-- **回收是尽力而为的**:空闲回收按 `last_used` 计时,页面宿主进程退出会即时出栈;但会话身份与登录态不落盘,进程重启后无法恢复——那是下一阶段的事(见 [现状与缺口](docs/roadmap.md))。
+- **回收是尽力而为的**:空闲回收按 `last_used` 计时,页面宿主进程退出会即时出栈;会话身份与登录态默认不落盘(要持久化就显式传 `profile`,见 [运行与运维](docs/operations.md))。
 - **截图:三个平台都可用**(Linux Xvfb+xwd / Windows PrintWindow / macOS WKWebView snapshot)。
   - Linux:页面用 `visible: true` 画进本进程自己起的 Xvfb(屏幕=视口),`xwd` 抓根窗口,Go 里解 XWD 转 PNG——拿到的一定是那个页面,不会误抓桌面。
   - Windows:`PrintWindow` + `PW_RENDERFULLCONTENT` 抓**页面宿主子进程**的窗口。这里踩过一个坑:窗口在子进程里,而抓取在父进程里运行,按自己的 pid 枚举永远找不到——现在把宿主的 pid 传下去。CI 实测 `640x400, 19 distinct colours`。
@@ -319,7 +325,8 @@ make doctor      # 自检要单独构建：golem 靠二进制里的模块路径�
 cmd/runvm/        入口:mcp / doctor / web-host / version
 internal/mcp/     JSON-RPC 2.0 与工具注册(零依赖)
 internal/tools/   24 个工具的参数校验与调用编排
-internal/session/ 会话注册表(泛型)
+internal/session/ 会话注册表(泛型,带 add/remove 钩子)
+internal/persist/ 会话台账 + 浏览器 profile(数据目录、原子写、平台重定向)
 internal/resources/ 可写资源存储(runvm://files/ 背后的磁盘根)
 internal/console/  HTTP 控制台(SPA + 登录鉴权 + 只读 MCP 调试页)
 internal/android/ golem 会话池 + ELF 导出表 + JNI 桩

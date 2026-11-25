@@ -12,10 +12,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/dolfly/runvm/internal/persist"
 )
 
 // defaultReadyTimeout covers a cold page load: spawning the host, starting
@@ -32,10 +35,13 @@ type Session struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 
-	visible  bool
-	display  string
-	own      bool
-	lastUsed atomic.Int64
+	visible   bool
+	display   string
+	own       bool
+	lastUsed  atomic.Int64
+	created   time.Time // when this page host was opened; immutable
+	ephemeral bool      // storage kept in memory only, as Open was asked
+	profile   string    // persistent profile name, empty when in-memory
 
 	shotMu  sync.Mutex
 	shotPNG []byte
@@ -91,6 +97,16 @@ type OpenOptions struct {
 	// OnProgress, when set, is called at coarse stages of a page open. It
 	// runs on the caller's goroutine, between blocking waits.
 	OnProgress func(progress float64, message string)
+
+	// Profile names a persistent browser profile. Cookies, localStorage and the
+	// rest of the website data land under <DataDir>/profiles/<Profile>, so a
+	// later process opens the same target still logged in. Ignored when
+	// Ephemeral is true: an ephemeral page keeps everything in memory, exactly
+	// as it did before profiles existed.
+	Profile string
+	// DataDir is the runvm data directory that holds the profiles. Required
+	// when Profile is set.
+	DataDir string
 }
 
 // Open starts a page host for target (a URL, a file path, or about:blank) and
@@ -121,6 +137,21 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 	cmd.Env = append(os.Environ(), "RUNVM_HOST=1")
 	if ephemeral {
 		cmd.Env = append(cmd.Env, "RUNVM_EPHEMERAL=1")
+	}
+	// A named profile redirects the child's website data into the profile
+	// directory. The engine decides where that data lives and each platform has
+	// exactly one lever (see persist.ProfileEnv), so the child's environment is
+	// the only place this can be expressed. An ephemeral page skips it: its
+	// storage is in memory and must stay there.
+	if opts.Profile != "" && !ephemeral {
+		if opts.DataDir == "" {
+			return nil, errors.New("h5_open: a persistent profile needs a data directory")
+		}
+		dir, err := persist.ProfileDir(opts.DataDir, opts.Profile)
+		if err != nil {
+			return nil, fmt.Errorf("h5_open: %w", err)
+		}
+		cmd.Env = append(cmd.Env, persist.ProfileEnv(runtime.GOOS, dir)...)
 	}
 	if opts.Visible {
 		cmd.Env = append(cmd.Env, "RUNVM_VISIBLE=1")
@@ -161,13 +192,16 @@ func Open(target string, opts OpenOptions) (*Session, error) {
 	progress(0.4, "host started, waiting for the page")
 
 	s := &Session{
-		visible: opts.Visible,
-		target:  target,
-		cmd:     cmd,
-		stdin:   stdin,
-		pending: map[int]*waiter{},
-		ready:   make(chan struct{}),
-		done:    make(chan struct{}),
+		visible:   opts.Visible,
+		target:    target,
+		cmd:       cmd,
+		stdin:     stdin,
+		created:   time.Now(),
+		ephemeral: ephemeral,
+		profile:   profileName(opts, ephemeral),
+		pending:   map[int]*waiter{},
+		ready:     make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	// Create-time touch matters: an untouched session reads as "idle since
 	// 1970" and the reaper would close it before its first call.
@@ -334,6 +368,28 @@ func (s *Session) touch() { s.lastUsed.Store(time.Now().UnixNano()) }
 
 // LastUsed reports the last time this page did work.
 func (s *Session) LastUsed() time.Time { return time.Unix(0, s.lastUsed.Load()) }
+
+// CreatedAt is when this page host was opened.
+func (s *Session) CreatedAt() time.Time { return s.created }
+
+// Ephemeral reports whether this page keeps cookies and storage in memory only.
+func (s *Session) Ephemeral() bool { return s.ephemeral }
+
+// Profile is the persistent browser profile this page uses, or "" when its
+// storage is in memory only.
+func (s *Session) Profile() string { return s.profile }
+
+// Visible reports whether the page draws in a window (the screenshot path).
+func (s *Session) Visible() bool { return s.visible }
+
+// profileName is the profile a session actually uses: none when the page is
+// ephemeral, since an in-memory store has nothing to keep.
+func profileName(opts OpenOptions, ephemeral bool) string {
+	if ephemeral {
+		return ""
+	}
+	return opts.Profile
+}
 
 // Console returns buffered console lines, optionally clearing them.
 func (s *Session) Console(clear bool) []Line {
@@ -536,6 +592,7 @@ func (s *Session) Target() string { return s.target }
 func NewDetached(target string, alive bool) *Session {
 	s := &Session{
 		target:  target,
+		created: time.Now(),
 		pending: map[int]*waiter{},
 		done:    make(chan struct{}),
 	}

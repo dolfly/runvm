@@ -1,6 +1,10 @@
 package session
 
-import "testing"
+import (
+	"sync"
+	"testing"
+	"time"
+)
 
 func TestStoreLifecycle(t *testing.T) {
 	s := New[string]("t")
@@ -39,5 +43,89 @@ func TestCloseAll(t *testing.T) {
 	}
 	if s.Len() != 0 {
 		t.Fatalf("store not empty after CloseAll: %d", s.Len())
+	}
+}
+
+func TestHooksFollowLifecycle(t *testing.T) {
+	s := New[string]("t")
+	var mu sync.Mutex
+	var added, removed []string
+	s.SetHooks(Hooks[string]{
+		Added:   func(id string, _ string) { mu.Lock(); added = append(added, id); mu.Unlock() },
+		Removed: func(id string, _ string) { mu.Lock(); removed = append(removed, id); mu.Unlock() },
+	})
+
+	a := s.Add("x")
+	b := s.Add("y")
+	s.Delete(a)
+	s.CloseAll()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(added) != 2 || added[0] != a || added[1] != b {
+		t.Errorf("added = %v, want [%s %s]", added, a, b)
+	}
+	if len(removed) != 2 || removed[0] != a || removed[1] != b {
+		t.Errorf("removed = %v, want [%s %s]", removed, a, b)
+	}
+}
+
+// A hook that reads the store back must not deadlock: the callbacks run after
+// the lock is released.
+func TestHookCanReadStore(t *testing.T) {
+	s := New[string]("t")
+	s.SetHooks(Hooks[string]{Added: func(id string, _ string) {
+		if _, ok := s.Get(id); !ok {
+			t.Errorf("hook could not read the session it was told about")
+		}
+		_ = s.IDs()
+	}})
+	s.Add("x")
+}
+
+func TestAddIDAndSeed(t *testing.T) {
+	s := New[string]("t")
+	if !s.AddID("h5-7", "resumed") {
+		t.Fatal("AddID on a free id should succeed")
+	}
+	if s.AddID("h5-7", "other") {
+		t.Fatal("AddID must refuse a taken id")
+	}
+	if got, _ := s.Get("h5-7"); got != "resumed" {
+		t.Errorf("AddID overwrote the live session: %q", got)
+	}
+
+	// A ledger restored with h5-7 must not hand out h5-1..h5-7 again.
+	s.Seed(7)
+	if id := s.Add("fresh"); id != "t-8" {
+		t.Errorf("Add after Seed(7) = %q, want t-8", id)
+	}
+	s.Seed(3) // a lower seed must not rewind the counter
+	if id := s.Add("fresh2"); id != "t-9" {
+		t.Errorf("Add after Seed(3) = %q, want t-9", id)
+	}
+}
+
+func TestReapUsesTouch(t *testing.T) {
+	s := New[string]("t")
+	old := s.Add("old")
+	s.Add("new")
+	touch := func(v string) time.Time {
+		if v == "old" {
+			return time.Unix(0, 0)
+		}
+		return time.Now()
+	}
+	if n := s.Reap(time.Now(), touch); n != 1 {
+		t.Fatalf("Reap closed %d, want 1", n)
+	}
+	if _, ok := s.Get(old); ok {
+		t.Error("the idle session survived Reap")
+	}
+	if s.Len() != 1 {
+		t.Errorf("Len = %d, want 1", s.Len())
+	}
+	if n := s.Reap(time.Now(), nil); n != 0 {
+		t.Error("Reap without a touch func must be a no-op")
 	}
 }
