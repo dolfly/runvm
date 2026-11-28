@@ -44,7 +44,7 @@ RUNVM_MAX_SESSIONS=8 RUNVM_IDLE_TIMEOUT=30m runvm
 
 - `RUNVM_IDLE_TIMEOUT` 默认 `30m`（`0` 表示关闭）：后台按每个会话的 `last_used` 回收；**创建即算使用**——第一版忘了这点，刚开的会话被当成"1970 年以来一直空闲"直接收掉。
 - **所有**使用会话的入口都会更新 `last_used`（`h5_console` / `h5_screenshot` / `h5_pdf` / `webbrain`，以及 android / ios 的读路径），所以正在用截图、PDF、无障碍树的会话不会被当成空闲收掉。
-- **h5 页面宿主进程死了会自己出栈**：页面 `exit()`、崩溃或被杀时，会话自动从注册表移除并释放配额，不需要手动 `h5_close`。android / ios 是进程内模拟器，没有独立的宿主进程，不适用"死会话出栈"——它们的回收只有空闲回收和进程退出时的 `CloseAll`。
+- **h5 页面宿主进程死了会自己出栈**：页面 `exit()`、崩溃或被杀时，会话自动从注册表移除并释放配额，不需要手动 `h5_close`。android / ios 是进程内模拟器，没有独立的宿主进程，不适用"死会话出栈"——它们的回收只有空闲回收和进程退出时的 `Shutdown`。
 - **批量释放**：`runvm_close_all` 一次关掉指定后端（`"backends": ["android", "ios", "h5"]`）或全部（不传 `backends`）。撞到 `RUNVM_MAX_SESSIONS` 时报错会直接列出当前会话和各自的目标，点名该关哪个。
 - 被自动回收的会话会留在 `runvm_status` 的 `reclaimed` 历史里（哪几个、为什么、什么时候），模型不会再看到一句没头没尾的 `unknown session`。
 
@@ -60,11 +60,12 @@ RUNVM_DATA_DIR=/data/runvm runvm http -addr 127.0.0.1:8765
 
 - **目录**：数据目录 0700，`sessions.json` 0600，`profiles/<名字>/` 0700。profile 里是活的登录态，权限不是装饰。
 - **台账**：`sessions.json` 跟随活跃会话，每次开/关重写（临时文件 + rename）。损坏时坏文件改名 `sessions.json.bad-<ts>` 保留，服务照常起，`runvm_status.persistence.ledger_error` 说明；比本构建新的版本只读不覆盖。
+- **优雅重启不清台账**：`SIGTERM`（`docker stop` / `docker restart` / systemd 重启 / Pod 终止）只关子进程和模拟器，**不重写台账**——最后一次活跃快照留在盘上。下次启动照常把这些会话报成 `stale`（带 `reason` 与 `reopen`），id 计数器也接着往后发，不会把旧号重新发出去。只有 `kill -9` 才拿不到关机动作，但台账本来就是上一次开/关时的快照，两条路径看到的内容一致。
 - **恢复**：`h5_open {"target": …, "ephemeral": false, "profile": "shop"}` 落 profile；重启后同名 profile 打开会复用台账里的 id（`restored: true`），cookie/localStorage 还在。启动**不自动重开**任何页面，只把 id 计数器推过已用号。
 - **看状态**：`runvm_status.persistence.sessions` 每条是 `restored`（已恢复、可寻址）或 `stale`（只剩记录，带 `reason` 与 `reopen` 参数）。`stale` 不假装是 `restored`。
 - **默认不持久化**：不传 `profile` 时即使 `ephemeral:false` 也只是内存态；要默认开就设 `RUNVM_H5_PERSIST=1`（部署决定）。
 - **平台**：Linux 走 `XDG_DATA_HOME`（实测重启后 cookie 在）；Windows 走 `APPDATA`；macOS 的 WKWebView 没有目录 API，只能改 `HOME`，**未在真机验证**。
-- **不落盘的东西**：android/ios 的模拟器状态（进程内），台账里只留记录；干净关闭的会话记录会消失，profile 目录留在盘上。
+- **不落盘的东西**：android/ios 的模拟器状态（进程内），台账里只留记录；profile 目录留在盘上，删数据目录才是唯一的回收方式。
 
 ## 远程访问的安全边界
 

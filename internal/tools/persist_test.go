@@ -18,8 +18,15 @@ import (
 // profile paths are the ones a server would use. No browser is started.
 func newPersistedSet(t *testing.T) *Set {
 	t.Helper()
+	return newPersistedSetIn(t, t.TempDir())
+}
+
+// newPersistedSetIn is newPersistedSet with a caller-chosen data directory, so
+// a test can start a second process against the directory the first one left.
+func newPersistedSetIn(t *testing.T, dir string) *Set {
+	t.Helper()
 	_, set := New("test", Limits{})
-	store, err := persist.Open(t.TempDir())
+	store, err := persist.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +62,57 @@ func TestLedgerFollowsLiveSet(t *testing.T) {
 	set.CloseAll()
 	if entries := set.Persist.Entries(); len(entries) != 0 {
 		t.Errorf("ledger after close_all = %+v, want empty", entries)
+	}
+}
+
+// A graceful shutdown (SIGTERM, docker stop, systemd restart) must keep the
+// ledger. The old code saved an empty snapshot while closing the sessions, so
+// the most common restart path erased every record and handed the ids out
+// again — while a kill -9 preserved them.
+func TestShutdownKeepsTheLastLedgerSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	set := newPersistedSetIn(t, dir)
+	set.H5.Add(h5.NewDetached("https://shop.example", true))
+	set.H5.Add(h5.NewDetached("https://news.example", true))
+
+	set.Shutdown()
+	if set.H5.Len() != 0 {
+		t.Fatalf("shutdown must close every session: h5=%d", set.H5.Len())
+	}
+
+	// The file on disk, not just the in-memory copy: a shutdown that rewrote
+	// the ledger would leave {"sessions": []} here.
+	raw, err := os.ReadFile(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "h5-1") || !strings.Contains(string(raw), "h5-2") {
+		t.Errorf("shutdown rewrote the ledger: %s", raw)
+	}
+
+	// A late change racing the shutdown must not wipe it either.
+	set.persistChange()
+	if entries := set.Persist.Entries(); len(entries) != 2 {
+		t.Errorf("ledger after shutdown = %+v, want both records kept", entries)
+	}
+
+	// Restart against the same directory: the records come back stale with a
+	// reason, and the ids continue instead of being reused.
+	again := newPersistedSetIn(t, dir)
+	details := statusRoot(t, again)["persistence"].(map[string]any)["sessions"].([]map[string]any)
+	if len(details) != 2 {
+		t.Fatalf("persisted details after restart = %+v, want two", details)
+	}
+	stale := map[string]bool{}
+	for _, d := range details {
+		id, _ := d["session"].(string)
+		stale[id] = d["state"] == "stale" && d["reason"] != nil
+	}
+	if !stale["h5-1"] || !stale["h5-2"] {
+		t.Errorf("every record must come back stale with a reason: %+v", details)
+	}
+	if id := again.H5.Add(h5.NewDetached("https://other.example", true)); id != "h5-3" {
+		t.Errorf("first h5 id after a graceful restart = %q, want h5-3 (no reuse)", id)
 	}
 }
 

@@ -96,6 +96,12 @@ func (s *Set) persistChange() {
 	}
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
+	if s.shuttingDown {
+		// The process is going away. Closing the sessions must not rewrite the
+		// ledger into an empty file: the next start needs this snapshot to report
+		// what was lost and to keep its ids from being reused.
+		return
+	}
 	if err := s.Persist.Save(s.ledgerEntries()); err != nil {
 		s.persistErr = err
 		return
