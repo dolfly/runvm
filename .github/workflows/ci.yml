@@ -197,6 +197,15 @@ jobs:
           HOME: /tmp
         run: python3 scripts/e2e.py /tmp/golem/examples/native/native.so
 
+      - name: graceful-restart ledger e2e (DO-127 B-1)
+        # Regression guard for the cmd/runvm shutdown wiring: unit tests cover
+        # the Set mechanics, but only a real SIGTERM to the real binary catches
+        # the ledger being rewritten empty on a graceful stop.
+        timeout-minutes: 10
+        env:
+          HOME: /tmp
+        run: python3 scripts/e2e_graceful_restart.py
+
   platforms:
     # The Linux job proves the backends work end to end; this one proves the
     # code builds and bootstraps where runvm is meant to run but a Linux box
