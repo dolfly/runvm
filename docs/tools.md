@@ -99,7 +99,7 @@ layout: page
 - **默认不翻**：不传 `profile` 时即使 `ephemeral: false` 也只是内存态，除非服务端设了 `RUNVM_H5_PERSIST`（`1`/`true` 用 `default`，或直接给名字）。默认值翻转是部署决定，不是代码偷偷改的。
 - **重启不自动重开**：启动只把 id 计数器推过台账里已用的号（避免 `h5-1` 撞车），不启动任何浏览器；`runvm_status` 的 `persistence.sessions` 会说明哪些记录已经 `restored`、哪些 `stale` 以及为什么。
 - **平台差异（不替引擎吹牛）**：Linux 用 `XDG_DATA_HOME`/`XDG_CACHE_HOME` 重定向（WebKitGTK 实测重启后 cookie 还在）；Windows 用 `APPDATA`（WebView2 的用户数据目录）；macOS 的 WKWebView 没有选目录的 API，只能改 `HOME`——**未在真机验证**，且会连带移动进程读写的其它 home 路径。
-- **边界**：台账是记录不是句柄。干净关闭的会话记录会消失（profile 目录留在盘上，按名字重开得到新 id）；android/ios 的模拟器状态从不落盘，台账里只留记录，`stale` 原因写的就是这句话。
+- **边界**：台账是记录不是句柄。优雅重启（`SIGTERM`）保留最后一次活跃快照，重启后这些会话以 `stale` + `reopen` 出现，id 不复用；`kill -9` 拿不到关机动作，但台账内容一样。android/ios 的模拟器状态从不落盘，台账里只留记录，`stale` 原因写的就是这句话。
 
 页面宿主进程自己退出（页面 `exit()`、崩溃、被杀）时，会话会被自动从注册表移除并释放配额，不需要手动 `h5_close`；这类回收会记进 `runvm_status` 的 `reclaimed`（`reason: "dead"`）。
 

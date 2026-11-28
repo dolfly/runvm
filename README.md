@@ -209,7 +209,7 @@ Linux 依赖:`apt install libwebkit2gtk-4.1-0 xvfb libgl1-mesa-dri`;Unicorn 在 
 - **所有使用会话的入口都更新 `last_used`**(`h5_console` / `h5_screenshot` / `h5_pdf` / `webbrain`,以及 android / ios 读路径),正在用的会话不会被空闲回收误杀。
 - **批量释放**用 `runvm_close_all`(可只关 `android` / `ios` / `h5`,不传则全关)。
 
-**运行态持久化**:`RUNVM_DATA_DIR` 下的 `sessions.json`(0600)跟随活跃会话,每次开/关重写(临时文件 + rename);损坏时坏文件改名 `.bad-<ts>` 保留并在 `runvm_status.persistence.ledger_error` 报出,服务照常起。`h5_open` 传 `profile` + `ephemeral:false` 时,cookie/localStorage 落在 `profiles/<名字>/`(0700);重启后同名 profile 重开会复用台账里的 id(`restored: true`),不传 profile 则连 `ephemeral:false` 也只是内存态(要默认开设 `RUNVM_H5_PERSIST`)。启动不自动重开页面,`persistence.sessions` 里 `restored`(已恢复可寻址)与 `stale`(只剩记录,带 `reason`/`reopen`)分开报。Linux 走 `XDG_DATA_HOME`(实测重启后 cookie 在),Windows 走 `APPDATA`,macOS 的 WKWebView 只能改 `HOME`(**未在真机验证**);android/ios 模拟器状态从不落盘。
+**运行态持久化**:`RUNVM_DATA_DIR` 下的 `sessions.json`(0600)跟随活跃会话,每次开/关重写(临时文件 + rename);损坏时坏文件改名 `.bad-<ts>` 保留并在 `runvm_status.persistence.ledger_error` 报出,服务照常起。`h5_open` 传 `profile` + `ephemeral:false` 时,cookie/localStorage 落在 `profiles/<名字>/`(0700);重启后同名 profile 重开会复用台账里的 id(`restored: true`),不传 profile 则连 `ephemeral:false` 也只是内存态(要默认开设 `RUNVM_H5_PERSIST`)。启动不自动重开页面,`persistence.sessions` 里 `restored`(已恢复可寻址)与 `stale`(只剩记录,带 `reason`/`reopen`)分开报。**优雅重启(`SIGTERM`/`docker restart`)不清台账**:关机只关子进程,最后一次活跃快照留在盘上,重启后这些会话报 `stale` 且 id 不复用。Linux 走 `XDG_DATA_HOME`(实测重启后 cookie 在),Windows 走 `APPDATA`,macOS 的 WKWebView 只能改 `HOME`(**未在真机验证**);android/ios 模拟器状态从不落盘。
 
 异步 UI 用 `h5_wait_for` 而不是 `sleep`:
 

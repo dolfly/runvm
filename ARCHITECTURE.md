@@ -92,7 +92,7 @@ buffer 参数是刻意设计:很多 native 接口不返回值,而是往出参里
 
 ## 5. 生命周期与清理
 
-- 会话是显式资源:`*_close` 释放;`CloseAll()` 在 MCP 进程退出时兜底,杀掉所有子进程、关掉所有 emulator。
+- 会话是显式资源:`*_close` 释放;`Shutdown()` 在 MCP 进程退出时兜底,杀掉所有子进程、关掉所有 emulator,但**不重写台账**——最后一次活跃快照留给下次启动报 `stale`。
 - `h5_close` 先礼后兵:发 `{"op":"close"}` → 等 3 秒 → `SIGKILL` → `Wait()` 回收,避免僵尸进程。
 - 子进程的 stderr 直接继承父进程,不参与协议:WebKit/GTK 的噪声不能污染 stdout 上的 JSON-RPC。
 

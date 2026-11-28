@@ -45,7 +45,7 @@ runvm web-host（子进程，主 goroutine = WebView 事件循环）
 - **id**：`h5-N` / `android-N` / `ios-N`，进程内自增；启动时 `Restore()` 把计数器推过台账里已记录的最大号，避免重启后撞号。
 - **上限**：`RUNVM_MAX_SESSIONS`（默认 8）是所有后端活跃会话的总数，超了报 `too many sessions`。
 - **空闲回收**：后台 reaper 按 `last_used` 扫，`RUNVM_IDLE_TIMEOUT`（默认 30m）到点就关；h5 还会即时发现宿主进程退出并出栈。两者都记进 `reclaimed`，`runvm_status` 能看到“为什么这个会话不见了”。
-- **落盘**：钩子把活跃集同步进 `RUNVM_DATA_DIR/sessions.json`（0600，临时文件 + rename）。台账是**记录不是句柄**：进程被 `kill -9` 后重启，`persistence.sessions` 把记录分成 `restored`（同 id 已重新活过来）和 `stale`（只剩记录，附 `reason` 与 `reopen` 参数），从不把 `stale` 当成 `restored`。
+- **落盘**：钩子把活跃集同步进 `RUNVM_DATA_DIR/sessions.json`（0600，临时文件 + rename）。台账是**记录不是句柄**：进程被 `kill -9` 后重启，`persistence.sessions` 把记录分成 `restored`（同 id 已重新活过来）和 `stale`（只剩记录，附 `reason` 与 `reopen` 参数），从不把 `stale` 当成 `restored`。优雅退出（`SIGTERM`）走 `Shutdown()` 而不是 `CloseAll()`：它只关会话、**不重写台账**，所以 `docker restart` 与 `kill -9` 看到的内容一致，id 计数器也不会从 `h5-1` 重来。
 - **浏览器 profile**：`h5_open {"ephemeral": false, "profile": "name"}` 把 cookie/localStorage 落到 `profiles/name/`（0700），平台重定向见 `internal/persist/profile.go`（Linux `XDG_DATA_HOME`、Windows `APPDATA`、macOS `HOME`）。`ephemeral: true` 永远优先，profile 会被丢弃并在结果里报 `profile_ignored`。
 
 ## 并发模型

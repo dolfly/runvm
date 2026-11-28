@@ -96,8 +96,9 @@ func serve() {
 	openPersistence(set)
 	set.StartReaper(ctx)
 	// Sessions hold emulators and child processes; a clean shutdown must not
-	// leave either behind.
-	defer set.CloseAll()
+	// leave either behind. It keeps the ledger, so the next process can report
+	// what was open when this one stopped.
+	defer set.Shutdown()
 
 	if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "runvm:", err)
@@ -139,7 +140,7 @@ func serveHTTP(args []string) {
 	set.Resources = res
 	openPersistence(set)
 	set.StartReaper(ctx)
-	defer set.CloseAll()
+	defer set.Shutdown()
 
 	mcpHandler := server.Handler(mcp.HTTPOptions{Token: *token})
 

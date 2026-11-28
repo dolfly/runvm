@@ -60,9 +60,10 @@ type Set struct {
 	PersistErr error
 
 	// persistMu serializes ledger snapshots: the ledger is a full snapshot, so
-	// the last write has to be the newest state.
-	persistMu  sync.Mutex
-	persistErr error
+	// the last write has to be the newest state. It also guards shuttingDown.
+	persistMu    sync.Mutex
+	persistErr   error
+	shuttingDown bool
 }
 
 // Reclaimed records one session the server closed on its own — idle reaping,
@@ -96,7 +97,9 @@ func New(version string, limits Limits) (*mcp.Server, *Set) {
 			"The \"reclaimed\" list records sessions the server closed on its own — idle reaping, a page host " +
 			"that died, or runvm_close_all — with the reason and time. The \"persistence\" section reports the " +
 			"on-disk state: which recorded sessions are restored (live again under the same id) and which are " +
-			"stale, with the reason and the arguments that would bring one back. Cheap: does not boot anything.",
+			"stale, with the reason and the arguments that would bring one back. A graceful shutdown keeps the " +
+			"last snapshot, so sessions that were open when the process stopped come back as stale entries " +
+			"instead of vanishing. Cheap: does not boot anything.",
 		InputSchema: object(nil),
 		Handler:     s.status,
 	})
@@ -854,7 +857,8 @@ func (s *Set) reap(now time.Time) int {
 	return closed
 }
 
-// CloseAll releases every live session; call it on shutdown.
+// CloseAll releases every live session; call it when the whole set is being
+// torn down for good, ledger included (a full close is a full release).
 func (s *Set) CloseAll() {
 	for _, a := range s.Android.CloseAll() {
 		_ = a.Close()
@@ -865,6 +869,22 @@ func (s *Set) CloseAll() {
 	for _, w := range s.H5.CloseAll() {
 		_ = w.Close()
 	}
+}
+
+// Shutdown releases every live session because this process is going away.
+//
+// It is deliberately not CloseAll. Closing a session must not erase its record:
+// the ledger keeps the last snapshot of what was live, so the next process can
+// report those sessions as stale — with the reason and the arguments that would
+// bring one back — and seed its id counters past them. Saving an empty ledger
+// here (the old behaviour) made every record vanish on a graceful restart and
+// handed the same ids out again, so a `docker restart` looked like the sessions
+// had never existed while a `kill -9` preserved them.
+func (s *Set) Shutdown() {
+	s.persistMu.Lock()
+	s.shuttingDown = true
+	s.persistMu.Unlock()
+	s.CloseAll()
 }
 
 // Status reports the live backend and session snapshot, the same data the
